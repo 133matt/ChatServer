@@ -1,45 +1,66 @@
 const express = require('express');
 const cors = require('cors');
-const { v4: uuid } = require('uuid');
+const { Pool } = require('pg');
 
 const app = express();
-const PORT = process.env.PORT || 10000; // Render sets PORT env var
+const PORT = process.env.PORT || 10000;
 
-let messages = [];
+// Cockroach / Postgres pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  }
+});
 
 app.use(cors());
 app.use(express.json());
 
-app.get('/messages', (req, res) => {
-  const limit = Number(req.query.limit) || 50;
-  const start = Math.max(messages.length - limit, 0);
-  res.json(messages.slice(start));
+app.get('/', (req, res) => {
+  res.send('Chat API with CockroachDB is running');
 });
 
-app.post('/messages', (req, res) => {
+// Get last N messages
+app.get('/messages', async (req, res) => {
+  const limit = Number(req.query.limit) || 50;
+
+  try {
+    const result = await pool.query(
+      `SELECT id, username, text, timestamp
+       FROM messages
+       ORDER BY timestamp ASC
+       LIMIT $1`,
+      [limit]
+    );
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /messages error:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Add a message
+app.post('/messages', async (req, res) => {
   const { username, text, timestamp } = req.body || {};
 
   if (!username || !text || !timestamp) {
     return res.status(400).json({ error: 'Missing fields' });
   }
 
-  const msg = {
-    id: uuid(),
-    username,
-    text,
-    timestamp
-  };
+  try {
+    const result = await pool.query(
+      `INSERT INTO messages (username, text, timestamp)
+       VALUES ($1, $2, $3)
+       RETURNING id, username, text, timestamp`,
+      [username, text, timestamp]
+    );
 
-  messages.push(msg);
-  if (messages.length > 500) {
-    messages = messages.slice(-500);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /messages error:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
-
-  res.status(201).json(msg);
-});
-
-app.get('/', (req, res) => {
-  res.send('Chat API is running');
 });
 
 app.listen(PORT, () => {
