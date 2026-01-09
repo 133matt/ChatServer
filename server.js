@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' })); // Allow larger payloads for base64
 app.use(cors({ origin: true }));
 
 const pool = new Pool({
@@ -19,12 +19,12 @@ pool.on('error', (err) => console.error('DB pool error:', err));
 // Health check
 app.get('/', (req, res) => res.json({ status: 'OK' }));
 
-// GET messages - return timestamps as milliseconds
+// GET messages - return timestamps as milliseconds, include images
 app.get('/messages', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 500);
     const result = await pool.query(`
-      SELECT id, username, text, 
+      SELECT id, username, text, image,
              EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
       FROM messages 
       ORDER BY timestamp DESC 
@@ -39,13 +39,18 @@ app.get('/messages', async (req, res) => {
   }
 });
 
-// POST message - accept ms or ISO string
+// POST message - accept optional image
 app.post('/messages', async (req, res) => {
   try {
-    const { username, text, timestamp } = req.body;
+    const { username, text, timestamp, image } = req.body;
     
-    if (!username?.trim() || !text?.trim()) {
-      return res.status(400).json({ error: 'Missing username/text' });
+    if (!username?.trim() || (!text?.trim() && !image)) {
+      return res.status(400).json({ error: 'Need text or image' });
+    }
+
+    // Validate image size (max 500KB base64)
+    if (image && image.length > 650000) {
+      return res.status(400).json({ error: 'Image too large (max 500KB)' });
     }
 
     // Convert timestamp to Date
@@ -59,11 +64,11 @@ app.post('/messages', async (req, res) => {
     }
 
     const result = await pool.query(`
-      INSERT INTO messages (username, text, timestamp) 
-      VALUES ($1, $2, $3)
-      RETURNING id, username, text, 
+      INSERT INTO messages (username, text, image, timestamp) 
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, username, text, image,
                 EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
-    `, [username.trim(), text.trim(), ts]);
+    `, [username.trim(), text?.trim() || '', image || null, ts]);
     
     console.log('POST: saved', result.rows[0].id);
     res.status(201).json(result.rows[0]);
@@ -73,24 +78,23 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Init DB - DROP old table, create fresh
+// Init DB - create table with image column
 async function initDB() {
   try {
-    // Drop old table if exists (CAREFUL - deletes all data!)
     await pool.query('DROP TABLE IF EXISTS messages CASCADE');
     console.log('Dropped old table');
 
-    // Create fresh table with correct schema
     await pool.query(`
       CREATE TABLE messages (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(100) NOT NULL,
-        text TEXT NOT NULL,
+        text TEXT,
+        image LONGTEXT,
         timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX idx_timestamp ON messages(timestamp DESC);
     `);
-    console.log('✅ Fresh table created');
+    console.log('✅ Fresh table created with image support');
   } catch (err) {
     console.error('Init error:', err);
   }
