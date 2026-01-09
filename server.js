@@ -78,7 +78,7 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Init DB - create table with image column
+// Init DB - create table with image column (PostgreSQL TEXT)
 async function initDB() {
   try {
     await pool.query('DROP TABLE IF EXISTS messages CASCADE');
@@ -89,7 +89,7 @@ async function initDB() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(100) NOT NULL,
         text TEXT,
-        image LONGTEXT,
+        image TEXT,
         timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX idx_timestamp ON messages(timestamp DESC);
