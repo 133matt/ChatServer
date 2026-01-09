@@ -18,7 +18,7 @@ pool.on('error', (err) => console.error('DB pool error:', err));
 
 app.get('/', (req, res) => res.json({ status: 'OK' }));
 
-// GET messages
+// GET messages - return ms timestamps
 app.get('/messages', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 100);
@@ -28,16 +28,15 @@ app.get('/messages', async (req, res) => {
       ORDER BY timestamp DESC 
       LIMIT $1
     `, [limit]);
-    
     res.json(result.rows.reverse());
-    console.log(`GET: ${result.rows.length} msgs`);
+    console.log(`GET: ${result.rows.length}`);
   } catch (err) {
-    console.error('GET error:', err);
+    console.error('GET:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// POST message - handle both ms and ISO
+// POST - store as TIMESTAMPTZ, return ms
 app.post('/messages', async (req, res) => {
   try {
     const { username, text, timestamp } = req.body;
@@ -46,29 +45,29 @@ app.post('/messages', async (req, res) => {
       return res.status(400).json({ error: 'Missing username/text' });
     }
 
-    // Convert timestamp to ms for DB
-    let tsMs;
+    // Convert to TIMESTAMPTZ
+    let ts;
     if (typeof timestamp === 'string') {
-      tsMs = new Date(timestamp).getTime();
+      ts = `'${timestamp}'::timestamptz`;
     } else {
-      tsMs = Number(timestamp);
+      ts = `to_timestamp(${Number(timestamp)} / 1000)`;
     }
 
     const result = await pool.query(`
       INSERT INTO messages (username, text, timestamp) 
-      VALUES ($1, $2, to_timestamp($3 / 1000))
+      VALUES ($1, $2, ${ts})
       RETURNING id, username, text, extract(epoch from timestamp)::bigint * 1000 as timestamp
-    `, [username.trim(), text.trim(), tsMs]);
+    `, [username.trim(), text.trim()]);
     
-    console.log('POST:', result.rows[0].id);
+    console.log('POST:', result.rows[0]);
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error('POST error:', err.message);
+    console.error('POST:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Init
+// Create/repair table
 async function initDB() {
   try {
     await pool.query(`
@@ -76,15 +75,21 @@ async function initDB() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(50) NOT NULL,
         text TEXT NOT NULL,
-        timestamp TIMESTAMPTZ NOT NULL
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
       );
-      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_timestamp ON messages(timestamp);
+      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_messages_time ON messages(timestamp DESC);
     `);
-    console.log('✅ Ready');
+    
+    // Fix any bad data
+    await pool.query(`DELETE FROM messages WHERE timestamp::text = 'Invalid Timestamp'`);
+    
+    console.log('✅ DB ready');
   } catch (err) {
     console.error('Init:', err);
   }
 }
 
 const PORT = process.env.PORT || 10000;
-initDB().then(() => app.listen(PORT, () => console.log(`🚀 Port ${PORT}`)));
+initDB().then(() => {
+  app.listen(PORT, () => console.log(`🚀 Server on ${PORT}`));
+});
