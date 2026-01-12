@@ -1,120 +1,248 @@
-const express = require('express');
-const { Pool } = require('pg');
-const cors = require('cors');
+import express from "express";
+import cors from "cors";
+import mongoose from "mongoose";
+import dotenv from "dotenv";
+
+dotenv.config();
+
 const app = express();
+const PORT = process.env.PORT || 3000;
 
-// Increase limits for large file uploads
-app.use(express.json({ limit: '100mb' }));
-app.use(express.raw({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
-app.use(cors({ origin: true }));
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: "50mb" })); // Increase limit since we're storing URLs now, not base64
 
-// Increase payload size for streaming
-app.set('json spaces', 2);
+// MongoDB Connection
+mongoose
+  .connect(process.env.MONGODB_URI || "mongodb://localhost:27017/chat")
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ MongoDB error:", err));
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-});
+// Message Schema
+const messageSchema = new mongoose.Schema(
+  {
+    username: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 50,
+    },
+    text: {
+      type: String,
+      trim: true,
+      maxlength: 5000,
+    },
+    // OLD: Base64 image stored in DB (removed for large videos)
+    // image: String,
+    
+    // NEW: Cloudinary URL (for videos)
+    cloudinaryUrl: {
+      type: String,
+      default: null,
+    },
+    
+    // NEW: Media type indicator
+    mediaType: {
+      type: String,
+      enum: ["cloudinary", "base64", null],
+      default: null,
+    },
+    
+    // Keep base64 for images only (smaller)
+    image: {
+      type: String,
+      default: null,
+    },
+    
+    timestamp: {
+      type: Number,
+      required: true,
+      index: true,
+    },
+    device: {
+      type: String,
+      default: "Unknown",
+    },
+  },
+  { timestamps: true }
+);
 
-pool.on('error', (err) => console.error('DB pool error:', err));
+// Create indexes for better query performance
+messageSchema.index({ timestamp: -1 });
+messageSchema.index({ username: 1 });
+
+const Message = mongoose.model("Message", messageSchema);
+
+// ===== API ROUTES =====
 
 // Health check
-app.get('/', (req, res) => res.json({ status: 'OK' }));
+app.get("/", (req, res) => {
+  res.json({ status: "✅ Chat server is online" });
+});
 
-// GET messages
-app.get('/messages', async (req, res) => {
+// Get all messages (with limit)
+app.get("/messages", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 50, 500);
-    const result = await pool.query(`
-      SELECT id, username, text, image, device,
-             EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
-      FROM messages 
-      ORDER BY timestamp DESC 
-      LIMIT $1
-    `, [limit]);
-    
-    res.json(result.rows.reverse());
-    console.log(`GET: ${result.rows.length} messages`);
+    const limit = Math.min(parseInt(req.query.limit) || 100, 500); // Max 500 messages
+    const messages = await Message.find()
+      .sort({ timestamp: -1 })
+      .limit(limit)
+      .lean();
+
+    // Return in ascending order (oldest first)
+    res.json(messages.reverse());
   } catch (err) {
-    console.error('GET error:', err);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Get messages error:", err);
+    res.status(500).json({ error: "Failed to fetch messages" });
   }
 });
 
-// POST message - handles large files with streaming
-app.post('/messages', async (req, res) => {
+// Get messages by username
+app.get("/messages/user/:username", async (req, res) => {
   try {
-    const { username, text, timestamp, image, device } = req.body;
-    
-    if (!username?.trim() || (!text?.trim() && !image)) {
-      return res.status(400).json({ error: 'Need text or image/video' });
-    }
+    const messages = await Message.find({
+      username: { $regex: req.params.username, $options: "i" },
+    })
+      .sort({ timestamp: -1 })
+      .limit(100)
+      .lean();
 
-    // For very large base64, don't store in RAM - truncate for DB
-    let imageToStore = image;
-    if (image && image.length > 50000000) {
-      console.log('⚠️ Image too large for storage, truncating to 50MB');
-      imageToStore = image.substring(0, 50000000);
-    }
-
-    // Convert timestamp to Date
-    let ts = new Date();
-    if (timestamp) {
-      if (typeof timestamp === 'string') {
-        ts = new Date(timestamp);
-      } else {
-        ts = new Date(Number(timestamp));
-      }
-    }
-
-    const deviceInfo = device || 'Unknown';
-
-    const result = await pool.query(`
-      INSERT INTO messages (username, text, image, device, timestamp) 
-      VALUES ($1, $2, $3, $4, $5)
-      RETURNING id, username, text, image, device,
-                EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
-    `, [username.trim(), text?.trim() || '', imageToStore || null, deviceInfo, ts]);
-    
-    console.log('POST: saved', result.rows[0].id, 'from', deviceInfo, '- Image:', imageToStore ? (imageToStore.length / 1024 / 1024).toFixed(2) + ' MB' : 'none');
-    res.status(201).json(result.rows[0]);
+    res.json(messages.reverse());
   } catch (err) {
-    console.error('POST error:', err.message);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Get user messages error:", err);
+    res.status(500).json({ error: "Failed to fetch user messages" });
   }
 });
 
-// Init DB
-async function initDB() {
+// Post new message
+app.post("/messages", async (req, res) => {
   try {
-    await pool.query('DROP TABLE IF EXISTS messages CASCADE');
-    console.log('Dropped old table');
+    const { username, text, timestamp, image, cloudinaryUrl, mediaType, device } = req.body;
 
-    await pool.query(`
-      CREATE TABLE messages (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        username VARCHAR(100) NOT NULL,
-        text TEXT,
-        image TEXT,
-        device VARCHAR(100),
-        timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
-      );
-      CREATE INDEX idx_timestamp ON messages(timestamp DESC);
-    `);
-    console.log('✅ Fresh table created');
+    // Validation
+    if (!username || !timestamp) {
+      return res.status(400).json({ error: "Username and timestamp required" });
+    }
+
+    if (!text && !image && !cloudinaryUrl) {
+      return res.status(400).json({ error: "Message text or media required" });
+    }
+
+    // Check total data size
+    let totalSize = 0;
+    if (image) totalSize += image.length;
+    if (cloudinaryUrl) totalSize += cloudinaryUrl.length;
+    if (text) totalSize += text.length;
+
+    // If using cloudinaryUrl, we're storing a small URL (~200 bytes)
+    // If using base64, check it doesn't exceed limits
+    if (image && image.length > 5000000) {
+      // 5MB limit for base64 images only
+      return res.status(413).json({
+        error: "Image too large. Use Cloudinary for videos.",
+      });
+    }
+
+    // Create new message
+    const message = new Message({
+      username: username.trim().substring(0, 50),
+      text: text ? text.trim().substring(0, 5000) : "",
+      timestamp,
+      image: image || null, // Base64 for images only
+      cloudinaryUrl: cloudinaryUrl || null, // Cloudinary URL for videos
+      mediaType: mediaType || null, // "cloudinary" or "base64"
+      device: device || "Unknown",
+    });
+
+    await message.save();
+
+    console.log(`✅ Message saved:`, {
+      username: message.username,
+      hasText: !!message.text,
+      hasImage: !!message.image,
+      hasCloudinaryUrl: !!message.cloudinaryUrl,
+      mediaType: message.mediaType,
+      timestamp: new Date(message.timestamp).toLocaleString(),
+    });
+
+    res.status(201).json(message);
   } catch (err) {
-    console.error('Init error:', err);
+    console.error("❌ Post message error:", err);
+    res.status(500).json({ error: "Failed to save message", details: err.message });
   }
-}
+});
 
-const PORT = process.env.PORT || 10000;
-initDB().then(() => {
-  app.listen(PORT, () => {
-    console.log(`🚀 Chat server on port ${PORT}`);
-    console.log(`📡 API: https://chatserver-numj.onrender.com`);
-  });
+// Delete message by ID
+app.delete("/messages/:id", async (req, res) => {
+  try {
+    const message = await Message.findByIdAndDelete(req.params.id);
+
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    console.log(`✅ Message deleted:`, message._id);
+    res.json({ message: "Message deleted", id: message._id });
+  } catch (err) {
+    console.error("❌ Delete message error:", err);
+    res.status(500).json({ error: "Failed to delete message" });
+  }
+});
+
+// Delete all messages (admin only - be careful!)
+app.delete("/messages", async (req, res) => {
+  try {
+    // Optional: Add password protection
+    const adminKey = req.query.key;
+    if (adminKey !== process.env.ADMIN_KEY) {
+      return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    const result = await Message.deleteMany({});
+
+    console.log(`✅ All messages deleted:`, result.deletedCount);
+    res.json({ message: "All messages deleted", count: result.deletedCount });
+  } catch (err) {
+    console.error("❌ Delete all messages error:", err);
+    res.status(500).json({ error: "Failed to delete messages" });
+  }
+});
+
+// Get message count
+app.get("/stats", async (req, res) => {
+  try {
+    const count = await Message.countDocuments();
+    const users = await Message.distinct("username");
+    const oldestMessage = await Message.findOne().sort({ timestamp: 1 }).lean();
+    const newestMessage = await Message.findOne().sort({ timestamp: -1 }).lean();
+
+    res.json({
+      totalMessages: count,
+      uniqueUsers: users.length,
+      users: users,
+      oldestMessage: oldestMessage?.timestamp,
+      newestMessage: newestMessage?.timestamp,
+      serverTime: Date.now(),
+    });
+  } catch (err) {
+    console.error("❌ Stats error:", err);
+    res.status(500).json({ error: "Failed to fetch stats" });
+  }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error("❌ Server error:", err);
+  res.status(500).json({ error: "Internal server error" });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`
+  ┌─────────────────────────────┐
+  │  🚀 Chat Server Running      │
+  │  Port: ${PORT}                   │
+  │  Environment: ${process.env.NODE_ENV || "development"}  │
+  └─────────────────────────────┘
+  `);
 });
