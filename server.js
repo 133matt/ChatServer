@@ -3,8 +3,11 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const app = express();
 
-app.use(express.json({ limit: '80mb' })); // CHANGED FROM 10mb TO 80mb
+app.use(express.json({ limit: '100mb' }));
+app.use(express.raw({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(cors({ origin: true }));
+;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -112,4 +115,5 @@ initDB().then(() => {
     console.log(`📡 API: https://chatserver-numj.onrender.com`);
   });
 });
+
 
