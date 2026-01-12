@@ -49,9 +49,10 @@ app.post('/messages', async (req, res) => {
     }
 
     // Validate file size (max 55.9MB base64 for videos)  // CHANGED COMMENT
-    if (image && image.length > 72670000) {  // CHANGED FROM 6500000 TO 72670000
-      return res.status(400).json({ error: 'File too large (max 55.9MB)' }); // CHANGED ERROR MESSAGE
+      if (image && image.length > 99750000) {
+      return res.status(400).json({ error: 'File too large (max 75MB)' });
     }
+
 
     // Convert timestamp to Date
     let ts = new Date();
@@ -111,3 +112,4 @@ initDB().then(() => {
     console.log(`📡 API: https://chatserver-numj.onrender.com`);
   });
 });
+
