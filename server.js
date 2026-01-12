@@ -19,7 +19,7 @@ pool.on('error', (err) => console.error('DB pool error:', err));
 // Health check
 app.get('/', (req, res) => res.json({ status: 'OK' }));
 
-// GET messages - return timestamps as milliseconds, include images and device info
+// GET messages - return timestamps as milliseconds, include images/videos and device info
 app.get('/messages', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 500);
@@ -39,18 +39,18 @@ app.get('/messages', async (req, res) => {
   }
 });
 
-// POST message - accept optional image and device info
+// POST message - accept optional image/video and device info
 app.post('/messages', async (req, res) => {
   try {
     const { username, text, timestamp, image, device } = req.body;
     
     if (!username?.trim() || (!text?.trim() && !image)) {
-      return res.status(400).json({ error: 'Need text or image' });
+      return res.status(400).json({ error: 'Need text or image/video' });
     }
 
-    // Validate image size (max 500KB base64)
-    if (image && image.length > 650000) {
-      return res.status(400).json({ error: 'Image too large (max 500KB)' });
+    // Validate file size (max 5MB base64 for videos)
+    if (image && image.length > 6500000) {
+      return res.status(400).json({ error: 'File too large (max 5MB)' });
     }
 
     // Convert timestamp to Date
@@ -98,7 +98,7 @@ async function initDB() {
       );
       CREATE INDEX idx_timestamp ON messages(timestamp DESC);
     `);
-    console.log('✅ Fresh table created with device tracking support');
+    console.log('✅ Fresh table created with device tracking & media support');
   } catch (err) {
     console.error('Init error:', err);
   }
