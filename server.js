@@ -37,7 +37,7 @@ async function initDB() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(50) NOT NULL,
         text TEXT,
-        cloudinary_url VARCHAR(500),
+        file_url VARCHAR(500),
         media_type VARCHAR(20),
         device VARCHAR(100),
         timestamp BIGINT NOT NULL,
@@ -74,7 +74,7 @@ app.get("/messages", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const result = await pool.query(
-      `SELECT id, username, text, cloudinary_url, media_type, device, timestamp 
+      `SELECT id, username, text, file_url, media_type, device, timestamp 
        FROM messages ORDER BY timestamp ASC LIMIT $1`,
       [limit]
     );
@@ -91,7 +91,7 @@ app.get("/messages", async (req, res) => {
 app.get("/messages/user/:username", async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, username, text, cloudinary_url, media_type, device, timestamp 
+      `SELECT id, username, text, file_url, media_type, device, timestamp 
        FROM messages WHERE username ILIKE $1 ORDER BY timestamp DESC LIMIT 100`,
       [`%${req.params.username}%`]
     );
@@ -107,26 +107,26 @@ app.get("/messages/user/:username", async (req, res) => {
 // Post new message
 app.post("/messages", async (req, res) => {
   try {
-    const { username, text, timestamp, cloudinaryUrl, mediaType, device } = req.body;
+    const { username, text, timestamp, fileUrl, mediaType, device } = req.body;
 
     // Validation
     if (!username || !timestamp) {
       return res.status(400).json({ error: "Username and timestamp required" });
     }
 
-    if (!text && !cloudinaryUrl) {
+    if (!text && !fileUrl) {
       return res.status(400).json({ error: "Message text or media required" });
     }
 
-    // Insert message
+    // Insert message into CockroachDB
     const result = await pool.query(
-      `INSERT INTO messages (username, text, cloudinary_url, media_type, device, timestamp)
+      `INSERT INTO messages (username, text, file_url, media_type, device, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, username, text, cloudinary_url, media_type, device, timestamp`,
+       RETURNING id, username, text, file_url, media_type, device, timestamp`,
       [
         username.trim().substring(0, 50),
         text ? text.trim().substring(0, 5000) : null,
-        cloudinaryUrl || null,
+        fileUrl || null,  // Supabase URL (only if file was uploaded)
         mediaType || null,
         device || "Unknown",
         timestamp,
@@ -135,11 +135,11 @@ app.post("/messages", async (req, res) => {
 
     const savedMessage = result.rows[0];
 
-    console.log(`✅ Message saved:`, {
+    console.log(`✅ Message saved to CockroachDB:`, {
       id: savedMessage.id,
       username: savedMessage.username,
       hasText: !!savedMessage.text,
-      hasCloudinaryUrl: !!savedMessage.cloudinary_url,
+      hasFileUrl: !!savedMessage.file_url,
       mediaType: savedMessage.media_type,
       timestamp: new Date(savedMessage.timestamp).toLocaleString(),
     });
@@ -225,10 +225,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
   ┌─────────────────────────────┐
-  │  🚀 Chat Server Running    │ 
-  │  Port: ${PORT}              │
-  │  Database: CockroachDB      │
-  │  Cloudinary: Enabled        │
+  │  🚀 Chat Server Running      │
+  │  Port: ${PORT}                   │
+  │  DB: CockroachDB             │
+  │  Files: Supabase Storage     │
   └─────────────────────────────┘
   `);
 });
