@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const app = express();
 
-app.use(express.json({ limit: '10mb' })); // Allow larger payloads for base64
+app.use(express.json({ limit: '10mb' }));
 app.use(cors({ origin: true }));
 
 const pool = new Pool({
@@ -19,12 +19,12 @@ pool.on('error', (err) => console.error('DB pool error:', err));
 // Health check
 app.get('/', (req, res) => res.json({ status: 'OK' }));
 
-// GET messages - return timestamps as milliseconds, include images
+// GET messages - return timestamps as milliseconds, include images and device info
 app.get('/messages', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 500);
     const result = await pool.query(`
-      SELECT id, username, text, image,
+      SELECT id, username, text, image, device,
              EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
       FROM messages 
       ORDER BY timestamp DESC 
@@ -39,10 +39,10 @@ app.get('/messages', async (req, res) => {
   }
 });
 
-// POST message - accept optional image
+// POST message - accept optional image and device info
 app.post('/messages', async (req, res) => {
   try {
-    const { username, text, timestamp, image } = req.body;
+    const { username, text, timestamp, image, device } = req.body;
     
     if (!username?.trim() || (!text?.trim() && !image)) {
       return res.status(400).json({ error: 'Need text or image' });
@@ -63,14 +63,17 @@ app.post('/messages', async (req, res) => {
       }
     }
 
+    // Device info (default to "Unknown" if not provided)
+    const deviceInfo = device || 'Unknown';
+
     const result = await pool.query(`
-      INSERT INTO messages (username, text, image, timestamp) 
-      VALUES ($1, $2, $3, $4)
-      RETURNING id, username, text, image,
+      INSERT INTO messages (username, text, image, device, timestamp) 
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, username, text, image, device,
                 EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
-    `, [username.trim(), text?.trim() || '', image || null, ts]);
+    `, [username.trim(), text?.trim() || '', image || null, deviceInfo, ts]);
     
-    console.log('POST: saved', result.rows[0].id);
+    console.log('POST: saved', result.rows[0].id, 'from device:', deviceInfo);
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('POST error:', err.message);
@@ -78,7 +81,7 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Init DB - create table with image column (PostgreSQL TEXT)
+// Init DB - create table with device column
 async function initDB() {
   try {
     await pool.query('DROP TABLE IF EXISTS messages CASCADE');
@@ -90,11 +93,12 @@ async function initDB() {
         username VARCHAR(100) NOT NULL,
         text TEXT,
         image TEXT,
+        device VARCHAR(100),
         timestamp TIMESTAMPTZ NOT NULL DEFAULT now()
       );
       CREATE INDEX idx_timestamp ON messages(timestamp DESC);
     `);
-    console.log('✅ Fresh table created with image support');
+    console.log('✅ Fresh table created with device tracking support');
   } catch (err) {
     console.error('Init error:', err);
   }
