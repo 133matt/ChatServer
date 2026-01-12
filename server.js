@@ -11,224 +11,262 @@ const PORT = process.env.PORT || 3000;
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: "100mb" }));
+app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
-// CockroachDB Connection
+// CockroachDB Connection Pool
 const { Pool } = pg;
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
-});
 
-pool.on("connect", () => {
-  console.log("✅ CockroachDB connected");
-});
+let pool;
 
-pool.on("error", (err) => {
-  console.error("❌ CockroachDB error:", err);
-});
+try {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  });
 
-// Create table if not exists
+  pool.on("connect", () => {
+    console.log("✅ CockroachDB connected");
+  });
+
+  pool.on("error", (err) => {
+    console.error("❌ CockroachDB error:", err);
+  });
+} catch (err) {
+  console.error("❌ Failed to create pool:", err);
+  process.exit(1);
+}
+
+// Initialize database
 async function initDB() {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS messages (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        username VARCHAR(50) NOT NULL,
-        text TEXT,
-        file_url VARCHAR(500),
-        media_type VARCHAR(20),
-        device VARCHAR(100),
-        timestamp BIGINT NOT NULL,
-        created_at TIMESTAMPTZ DEFAULT now()
-      );
-    `);
-    
-    // Create indexes
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC);
-    `);
-    
-    await pool.query(`
-      CREATE INDEX IF NOT EXISTS idx_username ON messages(username);
-    `);
-    
-    console.log("✅ Database tables initialized");
-  } catch (err) {
-    console.error("❌ DB init error:", err);
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const client = await pool.connect();
+      try {
+        // Create table if not exists
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS messages (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            username VARCHAR(50) NOT NULL,
+            text TEXT,
+            file_url VARCHAR(500),
+            media_type VARCHAR(20),
+            device VARCHAR(200),
+            timestamp BIGINT NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT now()
+          );
+        `);
+
+        // MIGRATE: Add missing columns if they don't exist
+        try {
+          await client.query(`
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_url VARCHAR(500);
+          `);
+          console.log("✅ Added file_url column");
+        } catch (e) {
+          if (!e.message.includes("already exists")) {
+            console.log("ℹ file_url column already exists");
+          }
+        }
+
+        try {
+          await client.query(`
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type VARCHAR(20);
+          `);
+          console.log("✅ Added media_type column");
+        } catch (e) {
+          if (!e.message.includes("already exists")) {
+            console.log("ℹ media_type column already exists");
+          }
+        }
+
+        try {
+          await client.query(`
+            ALTER TABLE messages ADD COLUMN IF NOT EXISTS device VARCHAR(200);
+          `);
+          console.log("✅ Added device column");
+        } catch (e) {
+          if (!e.message.includes("already exists")) {
+            console.log("ℹ device column already exists");
+          }
+        }
+
+        // Create indexes
+        try {
+          await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC);
+          `);
+        } catch (e) {
+          // Index already exists - ignore
+        }
+
+        try {
+          await client.query(`
+            CREATE INDEX IF NOT EXISTS idx_username ON messages(username);
+          `);
+        } catch (e) {
+          // Index already exists - ignore
+        }
+
+        console.log("✅ Database initialized and migrated");
+        break;
+      } finally {
+        client.release();
+      }
+    } catch (err) {
+      retries--;
+      console.error(`❌ DB init error (${retries} retries left):`, err.message);
+      if (retries === 0) {
+        console.error("Failed to initialize database after 3 attempts");
+        // Continue anyway - some columns might already exist
+        break;
+      } else {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
   }
 }
 
 initDB();
 
-// ===== API ROUTES =====
+// ===== ROUTES =====
 
 // Health check
 app.get("/", (req, res) => {
   res.json({ status: "✅ Chat server is online" });
 });
 
-// Get all messages (with limit)
+// Get messages
 app.get("/messages", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
+    
     const result = await pool.query(
       `SELECT id, username, text, file_url, media_type, device, timestamp 
-       FROM messages ORDER BY timestamp ASC LIMIT $1`,
+       FROM messages 
+       ORDER BY timestamp ASC 
+       LIMIT $1`,
       [limit]
     );
 
-    console.log(`✅ Fetched ${result.rows.length} messages`);
-    res.json(result.rows);
+    res.json(result.rows || []);
   } catch (err) {
     console.error("❌ Get messages error:", err);
-    res.status(500).json({ error: "Failed to fetch messages" });
+    res.status(500).json({ 
+      error: "Failed to fetch messages", 
+      details: err.message,
+      code: err.code 
+    });
   }
 });
 
-// Get messages by username
-app.get("/messages/user/:username", async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT id, username, text, file_url, media_type, device, timestamp 
-       FROM messages WHERE username ILIKE $1 ORDER BY timestamp DESC LIMIT 100`,
-      [`%${req.params.username}%`]
-    );
-
-    console.log(`✅ Fetched ${result.rows.length} messages for user ${req.params.username}`);
-    res.json(result.rows.reverse());
-  } catch (err) {
-    console.error("❌ Get user messages error:", err);
-    res.status(500).json({ error: "Failed to fetch user messages" });
-  }
-});
-
-// Post new message
+// Post message
 app.post("/messages", async (req, res) => {
   try {
     const { username, text, timestamp, fileUrl, mediaType, device } = req.body;
 
-    // Validation
-    if (!username || !timestamp) {
-      return res.status(400).json({ error: "Username and timestamp required" });
+    // Validate
+    if (!username || typeof username !== "string") {
+      return res.status(400).json({ error: "Valid username required" });
+    }
+
+    if (!timestamp || typeof timestamp !== "number") {
+      return res.status(400).json({ error: "Valid timestamp required" });
     }
 
     if (!text && !fileUrl) {
-      return res.status(400).json({ error: "Message text or media required" });
+      return res.status(400).json({ error: "Message text or file URL required" });
     }
 
-    // Insert message into CockroachDB
+    // Sanitize inputs
+    const cleanUsername = username.trim().substring(0, 50);
+    const cleanText = text ? text.trim().substring(0, 5000) : null;
+    const cleanFileUrl = fileUrl ? fileUrl.substring(0, 500) : null;
+    const cleanMediaType = mediaType ? mediaType.substring(0, 20) : null;
+    const cleanDevice = device ? device.substring(0, 200) : null;
+
+    // Insert
     const result = await pool.query(
       `INSERT INTO messages (username, text, file_url, media_type, device, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, username, text, file_url, media_type, device, timestamp`,
-      [
-        username.trim().substring(0, 50),
-        text ? text.trim().substring(0, 5000) : null,
-        fileUrl || null,  // Supabase URL (only if file was uploaded)
-        mediaType || null,
-        device || "Unknown",
-        timestamp,
-      ]
+      [cleanUsername, cleanText, cleanFileUrl, cleanMediaType, cleanDevice, timestamp]
     );
 
-    const savedMessage = result.rows[0];
+    if (!result.rows || result.rows.length === 0) {
+      throw new Error("Failed to insert message");
+    }
 
-    console.log(`✅ Message saved to CockroachDB:`, {
-      id: savedMessage.id,
-      username: savedMessage.username,
-      hasText: !!savedMessage.text,
-      hasFileUrl: !!savedMessage.file_url,
-      mediaType: savedMessage.media_type,
-      timestamp: new Date(savedMessage.timestamp).toLocaleString(),
-    });
-
-    res.status(201).json(savedMessage);
+    console.log(`✅ Message saved from ${cleanUsername}`);
+    res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error("❌ Post message error:", err);
-    res.status(500).json({ error: "Failed to save message", details: err.message });
+    res.status(500).json({ 
+      error: "Failed to save message", 
+      details: err.message,
+      code: err.code 
+    });
   }
 });
 
-// Delete message by ID
+// Delete message
 app.delete("/messages/:id", async (req, res) => {
   try {
+    const { id } = req.params;
+
+    if (!id) {
+      return res.status(400).json({ error: "Message ID required" });
+    }
+
     const result = await pool.query(
       `DELETE FROM messages WHERE id = $1 RETURNING id`,
-      [req.params.id]
+      [id]
     );
 
-    if (result.rows.length === 0) {
+    if (!result.rows || result.rows.length === 0) {
       return res.status(404).json({ error: "Message not found" });
     }
 
-    console.log(`✅ Message deleted:`, result.rows[0].id);
-    res.json({ message: "Message deleted", id: result.rows[0].id });
+    res.json({ message: "Deleted", id: result.rows[0].id });
   } catch (err) {
-    console.error("❌ Delete message error:", err);
+    console.error("❌ Delete error:", err);
     res.status(500).json({ error: "Failed to delete message" });
   }
 });
 
-// Delete all messages
-app.delete("/messages", async (req, res) => {
-  try {
-    const adminKey = req.query.key;
-    if (adminKey !== process.env.ADMIN_KEY) {
-      return res.status(403).json({ error: "Unauthorized" });
-    }
-
-    const result = await pool.query(`DELETE FROM messages`);
-
-    console.log(`✅ All messages deleted`);
-    res.json({ message: "All messages deleted", count: result.rowCount });
-  } catch (err) {
-    console.error("❌ Delete all messages error:", err);
-    res.status(500).json({ error: "Failed to delete messages" });
-  }
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: "Not found" });
 });
 
-// Get stats
-app.get("/stats", async (req, res) => {
-  try {
-    const countResult = await pool.query(`SELECT COUNT(*) as count FROM messages`);
-    const usersResult = await pool.query(`SELECT DISTINCT username FROM messages ORDER BY username`);
-    const oldestResult = await pool.query(
-      `SELECT timestamp FROM messages ORDER BY timestamp ASC LIMIT 1`
-    );
-    const newestResult = await pool.query(
-      `SELECT timestamp FROM messages ORDER BY timestamp DESC LIMIT 1`
-    );
-
-    res.json({
-      totalMessages: parseInt(countResult.rows[0].count),
-      uniqueUsers: usersResult.rows.length,
-      users: usersResult.rows.map((r) => r.username),
-      oldestMessage: oldestResult.rows[0]?.timestamp,
-      newestMessage: newestResult.rows[0]?.timestamp,
-      serverTime: Date.now(),
-    });
-  } catch (err) {
-    console.error("❌ Stats error:", err);
-    res.status(500).json({ error: "Failed to fetch stats" });
-  }
-});
-
-// Error handling middleware
+// Error handler
 app.use((err, req, res, next) => {
   console.error("❌ Server error:", err);
-  res.status(500).json({ error: "Internal server error" });
+  res.status(500).json({ 
+    error: "Internal server error", 
+    message: err.message,
+    code: err.code 
+  });
 });
 
-// Start server
+// Start
 app.listen(PORT, () => {
   console.log(`
-  ┌─────────────────────────────┐
-  │  🚀 Chat Server Running      │
-  │  Port: ${PORT}                   │
-  │  DB: CockroachDB             │
-  │  Files: Supabase Storage     │
-  └─────────────────────────────┘
+  ┌──────────────────────────┐
+  │ 🚀 Chat Server Online   │
+  │ Port: ${PORT}                │
+  │ DB: CockroachDB          │
+  │ Files: Supabase Storage  │
+  └──────────────────────────┘
   `);
+});
+
+// Graceful shutdown
+process.on("SIGINT", async () => {
+  console.log("Shutting down gracefully...");
+  await pool.end();
+  process.exit(0);
 });
