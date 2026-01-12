@@ -1,270 +1,162 @@
-import express from "express";
-import cors from "cors";
-import pg from "pg";
-import dotenv from "dotenv";
-
-dotenv.config();
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 // Middleware
+// FIX: Increased payload limit to 100MB for video uploads
 app.use(cors());
-app.use(express.json({ limit: "100mb" }));
-app.use(express.urlencoded({ limit: "100mb", extended: true }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-// CockroachDB Connection Pool
-const { Pool } = pg;
-
-let pool;
-
-try {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 2000,
-  });
-
-  pool.on("connect", () => {
-    console.log("✅ CockroachDB connected");
-  });
-
-  pool.on("error", (err) => {
-    console.error("❌ CockroachDB error:", err);
-  });
-} catch (err) {
-  console.error("❌ Failed to create pool:", err);
-  process.exit(1);
-}
-
-// Initialize database
-async function initDB() {
-  let retries = 3;
-  while (retries > 0) {
-    try {
-      const client = await pool.connect();
-      try {
-        // Create table if not exists
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS messages (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            username VARCHAR(50) NOT NULL,
-            text TEXT,
-            file_url VARCHAR(500),
-            media_type VARCHAR(20),
-            device VARCHAR(200),
-            timestamp BIGINT NOT NULL,
-            created_at TIMESTAMPTZ DEFAULT now()
-          );
-        `);
-
-        // MIGRATE: Add missing columns if they don't exist
-        try {
-          await client.query(`
-            ALTER TABLE messages ADD COLUMN IF NOT EXISTS file_url VARCHAR(500);
-          `);
-          console.log("✅ Added file_url column");
-        } catch (e) {
-          // Column might already exist
-        }
-
-        try {
-          await client.query(`
-            ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_type VARCHAR(20);
-          `);
-          console.log("✅ Added media_type column");
-        } catch (e) {
-          // Column might already exist
-        }
-
-        try {
-          await client.query(`
-            ALTER TABLE messages ADD COLUMN IF NOT EXISTS device VARCHAR(200);
-          `);
-          console.log("✅ Added device column");
-        } catch (e) {
-          // Column might already exist
-        }
-
-        // Create indexes
-        try {
-          await client.query(`
-            CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC);
-          `);
-        } catch (e) {
-          // Index already exists
-        }
-
-        try {
-          await client.query(`
-            CREATE INDEX IF NOT EXISTS idx_username ON messages(username);
-          `);
-        } catch (e) {
-          // Index already exists
-        }
-
-        console.log("✅ Database initialized and migrated");
-        break;
-      } finally {
-        client.release();
-      }
-    } catch (err) {
-      retries--;
-      console.error(`❌ DB init error (${retries} retries left):`, err.message);
-      if (retries === 0) {
-        console.error("Failed to initialize database after 3 attempts");
-        break;
-      } else {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-  }
-}
-
-initDB();
-
-// ===== ROUTES =====
-
-// Health check
-app.get("/", (req, res) => {
-  res.json({ status: "✅ Chat server is online" });
+// Database Pool
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
-// Get messages
-app.get("/messages", async (req, res) => {
+// Test database connection
+pool.query('SELECT NOW()', (err, result) => {
+  if (err) {
+    console.error('❌ Database connection failed:', err);
+  } else {
+    console.log('✅ Database connected:', result.rows[0]);
+  }
+});
+
+// ===== GET Messages =====
+app.get('/messages', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 100, 500);
-    
+    const limit = parseInt(req.query.limit) || 100;
+
     const result = await pool.query(
-      `SELECT id, username, text, file_url, media_type, device, timestamp 
-       FROM messages 
-       ORDER BY timestamp ASC 
-       LIMIT $1`,
+      `SELECT 
+        id,
+        username,
+        text,
+        EXTRACT(EPOCH FROM timestamp) * 1000 as timestamp,
+        file_url,
+        media_type
+      FROM messages 
+      ORDER BY timestamp DESC 
+      LIMIT $1`,
       [limit]
     );
 
-    res.json(result.rows || []);
-  } catch (err) {
-    console.error("❌ Get messages error:", err);
-    res.status(500).json({ 
-      error: "Failed to fetch messages", 
-      details: err.message 
-    });
+    // Return in ascending order (oldest first)
+    const messages = result.rows.reverse();
+    res.json(messages);
+  } catch (error) {
+    console.error('❌ GET /messages error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Post message
-app.post("/messages", async (req, res) => {
+// ===== POST Message =====
+app.post('/messages', async (req, res) => {
   try {
     const { username, text, timestamp, fileUrl, mediaType, device } = req.body;
 
-    // Validate
-    if (!username || typeof username !== "string") {
-      return res.status(400).json({ error: "Valid username required" });
-    }
-
-    // Convert timestamp to number if string
-    let tsNum = timestamp;
-    if (typeof timestamp === "string") {
-      tsNum = parseInt(timestamp, 10);
-    }
-    
-    if (!tsNum || typeof tsNum !== "number" || isNaN(tsNum)) {
-      return res.status(400).json({ error: "Valid timestamp required" });
+    // Validate required fields
+    if (!username) {
+      return res.status(400).json({ error: 'Username required' });
     }
 
     if (!text && !fileUrl) {
-      return res.status(400).json({ error: "Message text or file URL required" });
+      return res.status(400).json({ 
+        error: 'Message text or file URL required' 
+      });
     }
 
-    // Sanitize inputs
-    const cleanUsername = username.trim().substring(0, 50);
-    const cleanText = text ? text.trim().substring(0, 5000) : null;
-    const cleanFileUrl = fileUrl ? String(fileUrl).substring(0, 500) : null;
-    const cleanMediaType = mediaType ? String(mediaType).substring(0, 20) : null;
-    const cleanDevice = device ? String(device).substring(0, 200) : null;
-
-    console.log(`Inserting message: username=${cleanUsername}, timestamp=${tsNum}`);
-
-    // Insert - store timestamp as bigint
+    // FIX: Convert milliseconds to PostgreSQL timestamp
+    // Use to_timestamp() to convert from Unix milliseconds
     const result = await pool.query(
-      `INSERT INTO messages (username, text, file_url, media_type, device, timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, username, text, file_url, media_type, device, timestamp`,
-      [cleanUsername, cleanText, cleanFileUrl, cleanMediaType, cleanDevice, tsNum]
+      `INSERT INTO messages (username, text, timestamp, file_url, media_type, device)
+       VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6)
+       RETURNING 
+        id,
+        username,
+        text,
+        EXTRACT(EPOCH FROM timestamp) * 1000 as timestamp,
+        file_url,
+        media_type`,
+      [
+        username,
+        text || null,
+        timestamp || Date.now(),
+        fileUrl || null,
+        mediaType || null,
+        device || null,
+      ]
     );
 
-    if (!result.rows || result.rows.length === 0) {
-      throw new Error("Failed to insert message");
-    }
+    const message = result.rows[0];
+    console.log('✅ Message inserted:', message.id, username);
 
-    console.log(`✅ Message saved from ${cleanUsername}`);
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error("❌ Post message error:", err);
+    res.status(201).json({
+      id: message.id,
+      username: message.username,
+      text: message.text,
+      timestamp: parseInt(message.timestamp),
+      file_url: message.file_url,
+      media_type: message.media_type,
+    });
+  } catch (error) {
+    console.error('❌ POST /messages error:', error);
+    console.error('Error details:', error.detail, error.message);
+    
     res.status(500).json({ 
-      error: "Failed to save message", 
-      details: err.message
+      error: error.message,
+      details: error.detail || null,
+      code: error.code || null,
     });
   }
 });
 
-// Delete message
-app.delete("/messages/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id) {
-      return res.status(400).json({ error: "Message ID required" });
-    }
-
-    const result = await pool.query(
-      `DELETE FROM messages WHERE id = $1 RETURNING id`,
-      [id]
-    );
-
-    if (!result.rows || result.rows.length === 0) {
-      return res.status(404).json({ error: "Message not found" });
-    }
-
-    res.json({ message: "Deleted", id: result.rows[0].id });
-  } catch (err) {
-    console.error("❌ Delete error:", err);
-    res.status(500).json({ error: "Failed to delete message" });
-  }
-});
-
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ error: "Not found" });
-});
-
-// Error handler
-app.use((err, req, res, next) => {
-  console.error("❌ Server error:", err);
-  res.status(500).json({ 
-    error: "Internal server error", 
-    message: err.message
+// ===== Status Endpoint =====
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
   });
 });
 
-// Start
-app.listen(PORT, () => {
-  console.log(`
-  ┌──────────────────────────┐
-  │ 🚀 Chat Server Online   │
-  │ Port: ${PORT}                │
-  │ DB: CockroachDB          │
-  │ Files: Supabase Storage  │
-  └──────────────────────────┘
-  `);
+// ===== Health Check =====
+app.get('/health', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT NOW()');
+    res.json({ 
+      status: 'healthy',
+      database: 'connected',
+      timestamp: result.rows[0].now,
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'unhealthy',
+      error: error.message,
+    });
+  }
 });
 
-// Graceful shutdown
-process.on("SIGINT", async () => {
-  console.log("Shutting down gracefully...");
-  await pool.end();
-  process.exit(0);
+// ===== Error Handler =====
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: err.message,
+  });
+});
+
+// ===== Start Server =====
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`\n✅ ChatServer running on port ${PORT}`);
+  console.log(`📍 Server: http://localhost:${PORT}`);
+  console.log(`📊 Messages: http://localhost:${PORT}/messages`);
+  console.log(`🔍 Health: http://localhost:${PORT}/health\n`);
 });
