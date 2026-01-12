@@ -37,17 +37,23 @@ async function initDB() {
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         username VARCHAR(50) NOT NULL,
         text TEXT,
-        image BYTEA,
-        cloudinary_url TEXT,
+        cloudinary_url VARCHAR(500),
         media_type VARCHAR(20),
         device VARCHAR(100),
         timestamp BIGINT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT now()
       );
-      
+    `);
+    
+    // Create indexes
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC);
+    `);
+    
+    await pool.query(`
       CREATE INDEX IF NOT EXISTS idx_username ON messages(username);
     `);
+    
     console.log("✅ Database tables initialized");
   } catch (err) {
     console.error("❌ DB init error:", err);
@@ -68,10 +74,12 @@ app.get("/messages", async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     const result = await pool.query(
-      `SELECT * FROM messages ORDER BY timestamp ASC LIMIT $1`,
+      `SELECT id, username, text, cloudinary_url, media_type, device, timestamp 
+       FROM messages ORDER BY timestamp ASC LIMIT $1`,
       [limit]
     );
 
+    console.log(`✅ Fetched ${result.rows.length} messages`);
     res.json(result.rows);
   } catch (err) {
     console.error("❌ Get messages error:", err);
@@ -83,10 +91,12 @@ app.get("/messages", async (req, res) => {
 app.get("/messages/user/:username", async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM messages WHERE username ILIKE $1 ORDER BY timestamp DESC LIMIT 100`,
+      `SELECT id, username, text, cloudinary_url, media_type, device, timestamp 
+       FROM messages WHERE username ILIKE $1 ORDER BY timestamp DESC LIMIT 100`,
       [`%${req.params.username}%`]
     );
 
+    console.log(`✅ Fetched ${result.rows.length} messages for user ${req.params.username}`);
     res.json(result.rows.reverse());
   } catch (err) {
     console.error("❌ Get user messages error:", err);
@@ -97,26 +107,25 @@ app.get("/messages/user/:username", async (req, res) => {
 // Post new message
 app.post("/messages", async (req, res) => {
   try {
-    const { username, text, timestamp, image, cloudinaryUrl, mediaType, device } = req.body;
+    const { username, text, timestamp, cloudinaryUrl, mediaType, device } = req.body;
 
     // Validation
     if (!username || !timestamp) {
       return res.status(400).json({ error: "Username and timestamp required" });
     }
 
-    if (!text && !image && !cloudinaryUrl) {
+    if (!text && !cloudinaryUrl) {
       return res.status(400).json({ error: "Message text or media required" });
     }
 
     // Insert message
     const result = await pool.query(
-      `INSERT INTO messages (username, text, image, cloudinary_url, media_type, device, timestamp)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO messages (username, text, cloudinary_url, media_type, device, timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, username, text, cloudinary_url, media_type, device, timestamp`,
       [
         username.trim().substring(0, 50),
         text ? text.trim().substring(0, 5000) : null,
-        image || null,
         cloudinaryUrl || null,
         mediaType || null,
         device || "Unknown",
@@ -184,7 +193,7 @@ app.delete("/messages", async (req, res) => {
 app.get("/stats", async (req, res) => {
   try {
     const countResult = await pool.query(`SELECT COUNT(*) as count FROM messages`);
-    const usersResult = await pool.query(`SELECT DISTINCT username FROM messages`);
+    const usersResult = await pool.query(`SELECT DISTINCT username FROM messages ORDER BY username`);
     const oldestResult = await pool.query(
       `SELECT timestamp FROM messages ORDER BY timestamp ASC LIMIT 1`
     );
@@ -216,10 +225,10 @@ app.use((err, req, res, next) => {
 app.listen(PORT, () => {
   console.log(`
   ┌─────────────────────────────┐
-  │  🚀 Chat Server Running      │
-  │  Port: ${PORT}                   │
-  │  Database: CockroachDB       │
+  │  🚀 Chat Server Running    │ 
+  │  Port: ${PORT}              │
+  │  Database: CockroachDB      │
+  │  Cloudinary: Enabled        │
   └─────────────────────────────┘
   `);
 });
-
