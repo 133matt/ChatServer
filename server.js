@@ -1,7 +1,10 @@
-const express = require('express');
-const cors = require('cors');
-const { Pool } = require('pg');
-require('dotenv').config();
+import express from 'express';
+import cors from 'cors';
+import pkg from 'pg';
+import dotenv from 'dotenv';
+
+const { Pool } = pkg;
+dotenv.config();
 
 const app = express();
 
@@ -61,15 +64,24 @@ app.post('/messages', async (req, res) => {
   try {
     const { username, text, timestamp, fileUrl, mediaType, device } = req.body;
 
+    // FIX: Log incoming data for debugging
+    console.log('📨 Incoming message:', { username, text: text ? text.substring(0, 50) : null, timestamp, fileUrl: fileUrl ? 'YES' : 'NO', mediaType, device: device ? device.substring(0, 30) : null });
+
     // Validate required fields
-    if (!username) {
-      return res.status(400).json({ error: 'Username required' });
+    if (!username || typeof username !== 'string' || username.trim().length === 0) {
+      return res.status(400).json({ error: 'Username is required and must be a string' });
     }
 
     if (!text && !fileUrl) {
       return res.status(400).json({ 
         error: 'Message text or file URL required' 
       });
+    }
+
+    // FIX: Ensure timestamp is valid number
+    const messageTimestamp = timestamp && typeof timestamp === 'number' ? timestamp : Date.now();
+    if (isNaN(messageTimestamp)) {
+      return res.status(400).json({ error: 'Invalid timestamp format' });
     }
 
     // FIX: Convert milliseconds to PostgreSQL timestamp
@@ -85,9 +97,9 @@ app.post('/messages', async (req, res) => {
         file_url,
         media_type`,
       [
-        username,
-        text || null,
-        timestamp || Date.now(),
+        username.trim(),
+        text ? text.trim() : null,
+        messageTimestamp,
         fileUrl || null,
         mediaType || null,
         device || null,
@@ -95,7 +107,7 @@ app.post('/messages', async (req, res) => {
     );
 
     const message = result.rows[0];
-    console.log('✅ Message inserted:', message.id, username);
+    console.log('✅ Message inserted:', message.id, 'from', username);
 
     res.status(201).json({
       id: message.id,
@@ -106,8 +118,10 @@ app.post('/messages', async (req, res) => {
       media_type: message.media_type,
     });
   } catch (error) {
-    console.error('❌ POST /messages error:', error);
-    console.error('Error details:', error.detail, error.message);
+    console.error('❌ POST /messages error:', error.message);
+    console.error('Error details:', error.detail);
+    console.error('Error code:', error.code);
+    console.error('Full error:', error);
     
     res.status(500).json({ 
       error: error.message,
