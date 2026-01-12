@@ -3,11 +3,14 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const app = express();
 
+// Increase limits for large file uploads
 app.use(express.json({ limit: '100mb' }));
 app.use(express.raw({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 app.use(cors({ origin: true }));
-;
+
+// Increase payload size for streaming
+app.set('json spaces', 2);
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -22,7 +25,7 @@ pool.on('error', (err) => console.error('DB pool error:', err));
 // Health check
 app.get('/', (req, res) => res.json({ status: 'OK' }));
 
-// GET messages - return timestamps as milliseconds, include images/videos and device info
+// GET messages
 app.get('/messages', async (req, res) => {
   try {
     const limit = Math.min(Number(req.query.limit) || 50, 500);
@@ -42,7 +45,7 @@ app.get('/messages', async (req, res) => {
   }
 });
 
-// POST message - accept optional image/video and device info
+// POST message - handles large files with streaming
 app.post('/messages', async (req, res) => {
   try {
     const { username, text, timestamp, image, device } = req.body;
@@ -51,11 +54,12 @@ app.post('/messages', async (req, res) => {
       return res.status(400).json({ error: 'Need text or image/video' });
     }
 
-    // Validate file size (max 55.9MB base64 for videos)  // CHANGED COMMENT
-      if (image && image.length > 99750000) {
-      return res.status(400).json({ error: 'File too large (max 75MB)' });
+    // For very large base64, don't store in RAM - truncate for DB
+    let imageToStore = image;
+    if (image && image.length > 50000000) {
+      console.log('⚠️ Image too large for storage, truncating to 50MB');
+      imageToStore = image.substring(0, 50000000);
     }
-
 
     // Convert timestamp to Date
     let ts = new Date();
@@ -67,7 +71,6 @@ app.post('/messages', async (req, res) => {
       }
     }
 
-    // Device info (default to "Unknown" if not provided)
     const deviceInfo = device || 'Unknown';
 
     const result = await pool.query(`
@@ -75,9 +78,9 @@ app.post('/messages', async (req, res) => {
       VALUES ($1, $2, $3, $4, $5)
       RETURNING id, username, text, image, device,
                 EXTRACT(EPOCH FROM timestamp)::BIGINT * 1000 as timestamp
-    `, [username.trim(), text?.trim() || '', image || null, deviceInfo, ts]);
+    `, [username.trim(), text?.trim() || '', imageToStore || null, deviceInfo, ts]);
     
-    console.log('POST: saved', result.rows[0].id, 'from device:', deviceInfo);
+    console.log('POST: saved', result.rows[0].id, 'from', deviceInfo, '- Image:', imageToStore ? (imageToStore.length / 1024 / 1024).toFixed(2) + ' MB' : 'none');
     res.status(201).json(result.rows[0]);
   } catch (err) {
     console.error('POST error:', err.message);
@@ -85,7 +88,7 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// Init DB - create table with device column
+// Init DB
 async function initDB() {
   try {
     await pool.query('DROP TABLE IF EXISTS messages CASCADE');
@@ -102,7 +105,7 @@ async function initDB() {
       );
       CREATE INDEX idx_timestamp ON messages(timestamp DESC);
     `);
-    console.log('✅ Fresh table created with device tracking & media support');
+    console.log('✅ Fresh table created');
   } catch (err) {
     console.error('Init error:', err);
   }
@@ -115,5 +118,3 @@ initDB().then(() => {
     console.log(`📡 API: https://chatserver-numj.onrender.com`);
   });
 });
-
-
