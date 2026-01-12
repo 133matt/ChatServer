@@ -1,21 +1,19 @@
-{
-  "name": "chat-server",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "Chat server with CockroachDB",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js"
-  },
-  "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5",
-    "pg": "^8.11.3",
-    "dotenv": "^16.3.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  }
-}
+// Chrome Extension Configuration
+// For: Chrome Chatroom Extension
 
+window.CONFIG = {
+  // Backend Server (Node.js + Express)
+  SERVER_URL: "https://chatserver-numj.onrender.com",
+
+  // Supabase Storage Configuration
+  SUPABASE_URL: "https://lbuxpikpkmkifrsuensx.supabase.co",
+  SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxidXhwaWtwa21raWZyc3VlbnN4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgyNDU5NDEsImV4cCI6MjA4MzgyMTk0MX0.OskWwR8yNEZltX5kZNfQvV9kA40BDGxPFsjwHQ6-0d0",
+
+  // Polling & Timeouts
+  REFRESH_INTERVAL: 3000, // 3 seconds
+  FETCH_TIMEOUT: 10000, // 10 seconds
+  POLL_TIMEOUT: 8000, // 8 seconds for background polling
+
+  // File Upload Limits
+  MAX_FILE_SIZE: 100 * 1024 * 1024, // 100MB
+};
