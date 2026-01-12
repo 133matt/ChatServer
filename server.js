@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const cors = require('cors');
 const app = express();
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '80mb' })); // CHANGED FROM 10mb TO 80mb
 app.use(cors({ origin: true }));
 
 const pool = new Pool({
@@ -48,9 +48,9 @@ app.post('/messages', async (req, res) => {
       return res.status(400).json({ error: 'Need text or image/video' });
     }
 
-    // Validate file size (max 5MB base64 for videos)
-    if (image && image.length > 6500000) {
-      return res.status(400).json({ error: 'File too large (max 5MB)' });
+    // Validate file size (max 55.9MB base64 for videos)  // CHANGED COMMENT
+    if (image && image.length > 72670000) {  // CHANGED FROM 6500000 TO 72670000
+      return res.status(400).json({ error: 'File too large (max 55.9MB)' }); // CHANGED ERROR MESSAGE
     }
 
     // Convert timestamp to Date
