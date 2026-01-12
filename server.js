@@ -67,9 +67,7 @@ async function initDB() {
           `);
           console.log("✅ Added file_url column");
         } catch (e) {
-          if (!e.message.includes("already exists")) {
-            console.log("ℹ file_url column already exists");
-          }
+          // Column might already exist
         }
 
         try {
@@ -78,9 +76,7 @@ async function initDB() {
           `);
           console.log("✅ Added media_type column");
         } catch (e) {
-          if (!e.message.includes("already exists")) {
-            console.log("ℹ media_type column already exists");
-          }
+          // Column might already exist
         }
 
         try {
@@ -89,9 +85,7 @@ async function initDB() {
           `);
           console.log("✅ Added device column");
         } catch (e) {
-          if (!e.message.includes("already exists")) {
-            console.log("ℹ device column already exists");
-          }
+          // Column might already exist
         }
 
         // Create indexes
@@ -100,7 +94,7 @@ async function initDB() {
             CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp DESC);
           `);
         } catch (e) {
-          // Index already exists - ignore
+          // Index already exists
         }
 
         try {
@@ -108,7 +102,7 @@ async function initDB() {
             CREATE INDEX IF NOT EXISTS idx_username ON messages(username);
           `);
         } catch (e) {
-          // Index already exists - ignore
+          // Index already exists
         }
 
         console.log("✅ Database initialized and migrated");
@@ -121,7 +115,6 @@ async function initDB() {
       console.error(`❌ DB init error (${retries} retries left):`, err.message);
       if (retries === 0) {
         console.error("Failed to initialize database after 3 attempts");
-        // Continue anyway - some columns might already exist
         break;
       } else {
         await new Promise((r) => setTimeout(r, 1000));
@@ -157,8 +150,7 @@ app.get("/messages", async (req, res) => {
     console.error("❌ Get messages error:", err);
     res.status(500).json({ 
       error: "Failed to fetch messages", 
-      details: err.message,
-      code: err.code 
+      details: err.message 
     });
   }
 });
@@ -173,7 +165,13 @@ app.post("/messages", async (req, res) => {
       return res.status(400).json({ error: "Valid username required" });
     }
 
-    if (!timestamp || typeof timestamp !== "number") {
+    // Convert timestamp to number if string
+    let tsNum = timestamp;
+    if (typeof timestamp === "string") {
+      tsNum = parseInt(timestamp, 10);
+    }
+    
+    if (!tsNum || typeof tsNum !== "number" || isNaN(tsNum)) {
       return res.status(400).json({ error: "Valid timestamp required" });
     }
 
@@ -184,16 +182,18 @@ app.post("/messages", async (req, res) => {
     // Sanitize inputs
     const cleanUsername = username.trim().substring(0, 50);
     const cleanText = text ? text.trim().substring(0, 5000) : null;
-    const cleanFileUrl = fileUrl ? fileUrl.substring(0, 500) : null;
-    const cleanMediaType = mediaType ? mediaType.substring(0, 20) : null;
-    const cleanDevice = device ? device.substring(0, 200) : null;
+    const cleanFileUrl = fileUrl ? String(fileUrl).substring(0, 500) : null;
+    const cleanMediaType = mediaType ? String(mediaType).substring(0, 20) : null;
+    const cleanDevice = device ? String(device).substring(0, 200) : null;
 
-    // Insert
+    console.log(`Inserting message: username=${cleanUsername}, timestamp=${tsNum}`);
+
+    // Insert - store timestamp as bigint
     const result = await pool.query(
       `INSERT INTO messages (username, text, file_url, media_type, device, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING id, username, text, file_url, media_type, device, timestamp`,
-      [cleanUsername, cleanText, cleanFileUrl, cleanMediaType, cleanDevice, timestamp]
+      [cleanUsername, cleanText, cleanFileUrl, cleanMediaType, cleanDevice, tsNum]
     );
 
     if (!result.rows || result.rows.length === 0) {
@@ -206,8 +206,7 @@ app.post("/messages", async (req, res) => {
     console.error("❌ Post message error:", err);
     res.status(500).json({ 
       error: "Failed to save message", 
-      details: err.message,
-      code: err.code 
+      details: err.message
     });
   }
 });
@@ -247,8 +246,7 @@ app.use((err, req, res, next) => {
   console.error("❌ Server error:", err);
   res.status(500).json({ 
     error: "Internal server error", 
-    message: err.message,
-    code: err.code 
+    message: err.message
   });
 });
 
