@@ -1,176 +1,260 @@
-import express from 'express';
-import cors from 'cors';
-import pkg from 'pg';
-import dotenv from 'dotenv';
+// ===== COMPLETE server.js =====
+// CockroachDB for messages/images + AWS S3 for videos (100MB)
 
-const { Pool } = pkg;
-dotenv.config();
+const express = require('express');
+const multer = require('multer');
+const { Pool } = require('pg');
+const AWS = require('aws-sdk');
+const fs = require('fs');
+const path = require('path');
+require('dotenv').config();
 
 const app = express();
 
-// Middleware
-// FIX: Increased payload limit to 100MB for video uploads
-app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ limit: '100mb', extended: true }));
-
-// Database Pool
+// ===== COCKROACHDB SETUP =====
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  connectionString: process.env.COCKROACHDB_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-// Test database connection
-pool.query('SELECT NOW()', (err, result) => {
+// Test connection
+pool.query('SELECT NOW()', (err, res) => {
   if (err) {
-    console.error('❌ Database connection failed:', err);
+    console.error('❌ CockroachDB connection error:', err.message);
   } else {
-    console.log('✅ Database connected:', result.rows[0]);
+    console.log('✅ CockroachDB connected:', res.rows[0]);
   }
 });
 
-// ===== GET Messages =====
+// ===== AWS S3 SETUP =====
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION || 'us-east-1'
+});
+
+const S3_BUCKET = process.env.AWS_S3_BUCKET;
+
+// ===== MIDDLEWARE =====
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// Multer for video files
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = 'uploads/';
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    const supportedTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/mpeg'];
+    if (supportedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Unsupported file type'));
+    }
+  },
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+});
+
+// ===== PING =====
+app.get('/ping', (req, res) => {
+  console.log('🔔 Ping received');
+  res.json({
+    status: 'online',
+    timestamp: Date.now(),
+    database: 'CockroachDB',
+    storage: 'AWS S3'
+  });
+});
+
+// ===== GET MESSAGES (from CockroachDB) =====
 app.get('/messages', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 100;
+    const limit = parseInt(req.query.limit, 10) || 50;
 
-    const result = await pool.query(
-      `SELECT 
-        id,
-        username,
-        text,
-        EXTRACT(EPOCH FROM timestamp) * 1000 as timestamp,
-        file_url,
-        media_type
-      FROM messages 
-      ORDER BY timestamp DESC 
-      LIMIT $1`,
+    const { rows } = await pool.query(
+      `SELECT id, username, text, image, video_url AS "videoUrl", timestamp
+       FROM messages
+       ORDER BY timestamp ASC
+       LIMIT $1`,
       [limit]
     );
 
-    // Return in ascending order (oldest first)
-    const messages = result.rows.reverse();
-    res.json(messages);
+    console.log(`✅ Fetched ${rows.length} messages from CockroachDB`);
+    res.json(rows);
   } catch (error) {
-    console.error('❌ GET /messages error:', error);
-    res.status(500).json({ error: error.message });
+    console.error('❌ GET /messages error:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch messages',
+      message: error.message
+    });
   }
 });
 
-// ===== POST Message =====
+// ===== POST MESSAGE (insert into CockroachDB) =====
 app.post('/messages', async (req, res) => {
   try {
-    const { username, text, timestamp, fileUrl, mediaType, device } = req.body;
+    const { username, text, image, videoUrl, timestamp } = req.body;
 
-    // FIX: Log incoming data for debugging
-    console.log('📨 Incoming message:', { username, text: text ? text.substring(0, 50) : null, timestamp, fileUrl: fileUrl ? 'YES' : 'NO', mediaType, device: device ? device.substring(0, 30) : null });
-
-    // Validate required fields
-    if (!username || typeof username !== 'string' || username.trim().length === 0) {
-      return res.status(400).json({ error: 'Username is required and must be a string' });
-    }
-
-    if (!text && !fileUrl) {
-      return res.status(400).json({ 
-        error: 'Message text or file URL required' 
+    if (!username || (!text && !image && !videoUrl)) {
+      return res.status(400).json({
+        error: 'Invalid message: need username and at least text/image/video'
       });
     }
 
-    // FIX: Ensure timestamp is valid number
-    const messageTimestamp = timestamp && typeof timestamp === 'number' ? timestamp : Date.now();
-    if (isNaN(messageTimestamp)) {
-      return res.status(400).json({ error: 'Invalid timestamp format' });
-    }
+    const ts = timestamp || Date.now();
 
-    // FIX: Convert milliseconds to PostgreSQL timestamp
-    // Use to_timestamp() to convert from Unix milliseconds
-    const result = await pool.query(
-      `INSERT INTO messages (username, text, timestamp, file_url, media_type, device)
-       VALUES ($1, $2, to_timestamp($3 / 1000.0), $4, $5, $6)
-       RETURNING 
-        id,
-        username,
-        text,
-        EXTRACT(EPOCH FROM timestamp) * 1000 as timestamp,
-        file_url,
-        media_type`,
-      [
-        username.trim(),
-        text ? text.trim() : null,
-        messageTimestamp,
-        fileUrl || null,
-        mediaType || null,
-        device || null,
-      ]
-    );
+    const insertQuery = `
+      INSERT INTO messages (username, text, image, video_url, timestamp)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id, username, text, image, video_url AS "videoUrl", timestamp;
+    `;
 
-    const message = result.rows[0];
-    console.log('✅ Message inserted:', message.id, 'from', username);
+    const values = [
+      username || 'Anonymous',
+      text || null,
+      image || null,
+      videoUrl || null,
+      ts
+    ];
 
-    res.status(201).json({
-      id: message.id,
-      username: message.username,
-      text: message.text,
-      timestamp: parseInt(message.timestamp),
-      file_url: message.file_url,
-      media_type: message.media_type,
+    const { rows } = await pool.query(insertQuery, values);
+    const saved = rows[0];
+
+    console.log('✅ Message saved to CockroachDB:', {
+      id: saved.id,
+      username: saved.username,
+      hasText: !!saved.text,
+      hasImage: !!saved.image,
+      hasVideo: !!saved.videoUrl,
+      timestamp: new Date(saved.timestamp).toISOString()
+    });
+
+    res.json({
+      success: true,
+      messageId: saved.id,
+      message: saved
     });
   } catch (error) {
     console.error('❌ POST /messages error:', error.message);
-    console.error('Error details:', error.detail);
-    console.error('Error code:', error.code);
-    console.error('Full error:', error);
-    
-    res.status(500).json({ 
-      error: error.message,
-      details: error.detail || null,
-      code: error.code || null,
+    res.status(500).json({
+      error: 'Failed to save message',
+      message: error.message
     });
   }
 });
 
-// ===== Status Endpoint =====
-app.get('/', (req, res) => {
-  res.json({
-    status: 'online',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-  });
-});
-
-// ===== Health Check =====
-app.get('/health', async (req, res) => {
+// ===== UPLOAD VIDEO TO AWS S3 =====
+app.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    const result = await pool.query('SELECT NOW()');
-    res.json({ 
-      status: 'healthy',
-      database: 'connected',
-      timestamp: result.rows[0].now,
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file provided' });
+    }
+
+    const fileSize = req.file.size;
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
+
+    console.log(`📹 Uploading to S3: ${req.file.originalname} (${fileSizeMB}MB)`);
+
+    // Read file from disk
+    const fileBuffer = fs.readFileSync(req.file.path);
+
+    // Upload to S3
+    const s3Key = `videos/${Date.now()}-${req.file.originalname}`;
+    const s3Params = {
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+      Body: fileBuffer,
+      ContentType: req.file.mimetype,
+      ACL: 'public-read'
+    };
+
+    const uploadResult = await s3.upload(s3Params).promise();
+
+    // Delete local temp file
+    fs.unlink(req.file.path, (err) => {
+      if (err) console.warn('⚠️ Could not delete temp file:', err.message);
+    });
+
+    const videoUrl = uploadResult.Location;
+
+    console.log('✅ Video uploaded to S3:', {
+      size: `${fileSizeMB}MB`,
+      bucket: S3_BUCKET,
+      key: s3Key,
+      url: videoUrl
+    });
+
+    res.json({
+      success: true,
+      videoUrl: videoUrl,
+      fileName: req.file.originalname,
+      size: fileSize
     });
   } catch (error) {
-    res.status(500).json({ 
-      status: 'unhealthy',
-      error: error.message,
+    console.error('❌ Upload error:', error.message);
+
+    // Cleanup on error
+    if (req.file && req.file.path) {
+      fs.unlink(req.file.path, () => {});
+    }
+
+    res.status(500).json({
+      error: 'Upload failed',
+      message: error.message
     });
   }
 });
 
-// ===== Error Handler =====
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    error: 'Internal server error',
-    message: err.message,
-  });
+// ===== HEALTH CHECK =====
+app.get('/health', async (req, res) => {
+  try {
+    const dbCheck = await pool.query('SELECT NOW()');
+    const s3Check = S3_BUCKET ? 'configured' : 'missing';
+
+    res.json({
+      status: 'healthy',
+      database: 'CockroachDB connected',
+      s3: s3Check,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
 });
 
-// ===== Start Server =====
-const PORT = process.env.PORT || 5000;
+// ===== START SERVER =====
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`\n✅ ChatServer running on port ${PORT}`);
-  console.log(`📍 Server: http://localhost:${PORT}`);
-  console.log(`📊 Messages: http://localhost:${PORT}/messages`);
-  console.log(`🔍 Health: http://localhost:${PORT}/health\n`);
+  console.log(`🚀 ChatServer running on port ${PORT}`);
+  console.log(`📊 Database: CockroachDB`);
+  console.log(`☁️  Storage: AWS S3`);
+  console.log(`🎥 Max video: 100MB`);
+  console.log(`💾 Messaging: CockroachDB messages table`);
+  console.log('');
+  console.log('Endpoints:');
+  console.log('  GET  /ping - Check if online');
+  console.log('  GET  /health - Full health check');
+  console.log('  GET  /messages - Fetch messages from CockroachDB');
+  console.log('  POST /messages - Save message to CockroachDB');
+  console.log('  POST /upload - Upload video to AWS S3');
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  await pool.end();
+  process.exit(0);
 });
