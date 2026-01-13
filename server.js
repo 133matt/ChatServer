@@ -128,7 +128,7 @@ app.post('/messages', async (req, res) => {
       text || null,
       image || null,
       videoUrl || null,
-      ts
+      new Date(ts).toISOString() // Convert JS timestamp to ISO string
     ];
 
     const { rows } = await pool.query(insertQuery, values);
