@@ -1,7 +1,7 @@
 {
-  "name": "chrome-chatroom-cockroachdb-s3",
+  "name": "chrome-chatroom-cockroachdb-cloudinary",
   "version": "2.0.0",
-  "description": "Chrome chatroom with CockroachDB messaging and AWS S3 100MB video storage",
+  "description": "Chrome chatroom with CockroachDB messaging and Cloudinary 100MB video storage",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -10,7 +10,7 @@
   "dependencies": {
     "express": "^4.18.2",
     "multer": "^1.4.5-lts.1",
-    "aws-sdk": "^2.1.4",
+    "cloudinary": "^1.41.0",
     "pg": "^8.11.5",
     "dotenv": "^16.3.1"
   },
@@ -24,10 +24,10 @@
     "chrome-extension",
     "chatroom",
     "cockroachdb",
-    "aws-s3",
+    "cloudinary",
     "messaging",
     "video-sharing"
   ],
-  "author": "Matt",
+  "author": "Your Name",
   "license": "MIT"
 }
