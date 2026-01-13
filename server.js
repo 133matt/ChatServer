@@ -1,10 +1,10 @@
 // ===== COMPLETE server.js =====
-// CockroachDB for messages/images + AWS S3 for videos (100MB)
+// CockroachDB for messages/images + Cloudinary for videos (100MB)
 
 const express = require('express');
 const multer = require('multer');
 const { Pool } = require('pg');
-const AWS = require('aws-sdk');
+const cloudinary = require('cloudinary').v2;
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -26,20 +26,25 @@ pool.query('SELECT NOW()', (err, res) => {
   }
 });
 
-// ===== AWS S3 SETUP =====
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.AWS_REGION || 'us-east-1'
+// ===== CLOUDINARY SETUP =====
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
 });
 
-const S3_BUCKET = process.env.AWS_S3_BUCKET;
+// Test Cloudinary connection
+try {
+  console.log('✅ Cloudinary configured:', process.env.CLOUDINARY_CLOUD_NAME);
+} catch (error) {
+  console.error('❌ Cloudinary config error:', error.message);
+}
 
 // ===== MIDDLEWARE =====
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// Multer for video files
+// Multer for video files (temporary storage before upload to Cloudinary)
 const upload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
@@ -71,7 +76,7 @@ app.get('/ping', (req, res) => {
     status: 'online',
     timestamp: Date.now(),
     database: 'CockroachDB',
-    storage: 'AWS S3'
+    storage: 'Cloudinary'
   });
 });
 
@@ -152,7 +157,7 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// ===== UPLOAD VIDEO TO AWS S3 =====
+// ===== UPLOAD VIDEO TO CLOUDINARY =====
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -162,35 +167,28 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     const fileSize = req.file.size;
     const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
 
-    console.log(`📹 Uploading to S3: ${req.file.originalname} (${fileSizeMB}MB)`);
+    console.log(`📹 Uploading to Cloudinary: ${req.file.originalname} (${fileSizeMB}MB)`);
 
-    // Read file from disk
-    const fileBuffer = fs.readFileSync(req.file.path);
-
-    // Upload to S3
-    const s3Key = `videos/${Date.now()}-${req.file.originalname}`;
-    const s3Params = {
-      Bucket: S3_BUCKET,
-      Key: s3Key,
-      Body: fileBuffer,
-      ContentType: req.file.mimetype,
-      ACL: 'public-read'
-    };
-
-    const uploadResult = await s3.upload(s3Params).promise();
+    // Upload to Cloudinary (streaming file)
+    const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+      resource_type: 'video',
+      public_id: `chatroom/videos/${Date.now()}`,
+      chunk_size: 6000000, // 6MB chunks for large files
+      overwrite: true
+    });
 
     // Delete local temp file
     fs.unlink(req.file.path, (err) => {
       if (err) console.warn('⚠️ Could not delete temp file:', err.message);
     });
 
-    const videoUrl = uploadResult.Location;
+    const videoUrl = uploadResult.secure_url;
 
-    console.log('✅ Video uploaded to S3:', {
+    console.log('✅ Video uploaded to Cloudinary:', {
       size: `${fileSizeMB}MB`,
-      bucket: S3_BUCKET,
-      key: s3Key,
-      url: videoUrl
+      publicId: uploadResult.public_id,
+      url: videoUrl,
+      duration: uploadResult.duration ? `${uploadResult.duration}s` : 'unknown'
     });
 
     res.json({
@@ -218,12 +216,12 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 app.get('/health', async (req, res) => {
   try {
     const dbCheck = await pool.query('SELECT NOW()');
-    const s3Check = S3_BUCKET ? 'configured' : 'missing';
+    const cloudinaryCheck = process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'missing';
 
     res.json({
       status: 'healthy',
       database: 'CockroachDB connected',
-      s3: s3Check,
+      cloudinary: cloudinaryCheck,
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -240,7 +238,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 ChatServer running on port ${PORT}`);
   console.log(`📊 Database: CockroachDB`);
-  console.log(`☁️  Storage: AWS S3`);
+  console.log(`☁️  Storage: Cloudinary`);
   console.log(`🎥 Max video: 100MB`);
   console.log(`💾 Messaging: CockroachDB messages table`);
   console.log('');
@@ -249,7 +247,7 @@ app.listen(PORT, () => {
   console.log('  GET  /health - Full health check');
   console.log('  GET  /messages - Fetch messages from CockroachDB');
   console.log('  POST /messages - Save message to CockroachDB');
-  console.log('  POST /upload - Upload video to AWS S3');
+  console.log('  POST /upload - Upload video to Cloudinary');
 });
 
 // Graceful shutdown
