@@ -1,4 +1,4 @@
-// ===== COMPLETE server.js =====
+// ===== server.js =====
 // CockroachDB for messages/images + Cloudinary for videos (100MB)
 
 const express = require('express');
