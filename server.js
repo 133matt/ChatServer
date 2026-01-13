@@ -1,7 +1,6 @@
 const express = require('express');
 const { Client } = require('pg');
 const cors = require('cors');
-const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const app = express();
@@ -11,17 +10,17 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb' }));
 
-// ===== CLOUDINARY CONFIG =====
-cloudinary.config({
-  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
-  api_secret: process.env.CLOUDINARY_API_SECRET
-});
-
 // ===== DATABASE CONNECTION =====
 const getClient = () => {
+  // Try COCKROACHDB_URL first, fall back to DATABASE_URL
+  const connectionString = process.env.COCKROACHDB_URL || process.env.DATABASE_URL;
+  
+  if (!connectionString) {
+    throw new Error('❌ No database URL found! Set COCKROACHDB_URL or DATABASE_URL environment variable');
+  }
+
   const client = new Client({
-    connectionString: process.env.DATABASE_URL,
+    connectionString: connectionString,
     ssl: { rejectUnauthorized: false }
   });
   return client;
@@ -71,6 +70,7 @@ app.get('/health', async (req, res) => {
       timestamp: result.rows[0].now
     });
   } catch (error) {
+    console.error('❌ Health check error:', error.message);
     res.status(500).json({
       status: 'error',
       message: error.message
@@ -173,49 +173,6 @@ app.post('/messages', async (req, res) => {
   }
 });
 
-// ===== UPLOAD VIDEO TO CLOUDINARY =====
-app.post('/upload', async (req, res) => {
-  try {
-    if (!req.files || !req.files.file) {
-      return res.status(400).json({
-        error: 'No file provided'
-      });
-    }
-
-    const file = req.files.file;
-    const fileSize = file.size / 1024 / 1024;
-
-    if (fileSize > 100) {
-      return res.status(400).json({
-        error: 'Video must be smaller than 100MB'
-      });
-    }
-
-    console.log(`📁 Uploading file: ${file.name} (${fileSize.toFixed(2)}MB)`);
-
-    const uploadResult = await cloudinary.uploader.upload(file.tempFilePath, {
-      resource_type: 'video',
-      folder: 'chatroom_videos',
-      quality: 'auto',
-      fetch_format: 'mp4',
-      timeout: 60000
-    });
-
-    console.log('✅ Video uploaded to Cloudinary');
-
-    res.json({
-      success: true,
-      videoUrl: uploadResult.secure_url,
-      cloudinaryId: uploadResult.public_id
-    });
-  } catch (error) {
-    console.error('❌ Upload error:', error.message);
-    res.status(500).json({
-      error: error.message
-    });
-  }
-});
-
 // ===== RESET CHAT (DELETE ALL MESSAGES) =====
 app.post('/reset', async (req, res) => {
   try {
@@ -295,39 +252,6 @@ app.get('/stats', async (req, res) => {
   } catch (error) {
     console.error('❌ Stats error:', error.message);
     res.status(500).json({
-      error: error.message
-    });
-  }
-});
-
-// ===== CLEAR OLD MESSAGES (Maintenance) =====
-app.post('/maintenance/cleanup-old', async (req, res) => {
-  try {
-    const { hoursOld = 24 } = req.body;
-
-    const client = getClient();
-    await client.connect();
-
-    const cutoffTime = Date.now() - (hoursOld * 60 * 60 * 1000);
-
-    const result = await client.query(
-      'DELETE FROM messages WHERE timestamp < $1',
-      [cutoffTime]
-    );
-
-    console.log(`🧹 Cleanup: Deleted ${result.rowCount} old messages`);
-
-    await client.end();
-
-    res.json({
-      success: true,
-      deletedCount: result.rowCount,
-      hoursOld: hoursOld
-    });
-  } catch (error) {
-    console.error('❌ Cleanup error:', error.message);
-    res.status(500).json({
-      success: false,
       error: error.message
     });
   }
