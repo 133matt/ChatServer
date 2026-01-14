@@ -1,9 +1,16 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE SUPPORT =====
+// ===== server.js - CHATSERVER WITH YOUTUBE SUPPORT (CLOUDINARY FIXED) =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
-const ytdl = require('ytdl-core'); // ADD THIS LINE
+const ytdl = require('ytdl-core');
 require('dotenv').config();
+
+// ===== CONFIGURE CLOUDINARY WITH INDIVIDUAL ENV VARIABLES =====
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dfkedoqtu',
+  api_key: process.env.CLOUDINARY_API_KEY || '974623582669831',
+  api_secret: process.env.CLOUDINARY_API_SECRET || 'n5UMrnz2_7g2QZ4-axmkhcY0PA'
+});
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -255,11 +262,13 @@ app.post('/download-youtube', async (req, res) => {
 
 // ===== HEALTH CHECK ENDPOINT =====
 app.get('/health-check', (req, res) => {
+  const cloudinaryConfig = cloudinary.config();
   res.json({ 
     status: 'ok',
     message: 'Server is running',
     ytdlCore: typeof ytdl !== 'undefined' ? 'installed ✅' : 'missing ❌',
-    cloudinary: cloudinary.config().cloud_name ? 'configured ✅' : 'not configured ❌',
+    cloudinary: cloudinaryConfig.cloud_name ? 'configured ✅' : 'not configured ❌',
+    cloudinaryCloudName: cloudinaryConfig.cloud_name || 'not set',
     messagesCount: messages.length
   });
 });
@@ -268,7 +277,9 @@ app.get('/health-check', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`✅ YouTube download support enabled`);
-  console.log(`📊 Cloudinary configured: ${cloudinary.config().cloud_name ? '✅' : '❌'}`);
+  
+  const cloudinaryConfig = cloudinary.config();
+  console.log(`📊 Cloudinary configured: ${cloudinaryConfig.cloud_name ? '✅ (' + cloudinaryConfig.cloud_name + ')' : '❌'}`);
   console.log(`📦 ytdl-core available: ${typeof ytdl !== 'undefined' ? '✅' : '❌'}`);
 });
 
