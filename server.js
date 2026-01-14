@@ -10,7 +10,8 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
-
+const express = require('express');
+const ytdl = require('ytdl-core');
 const app = express();
 
 // ===== COCKROACHDB SETUP =====
@@ -302,6 +303,121 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     });
   }
 });
+// ===== NEW ENDPOINT: DOWNLOAD YOUTUBE VIDEO =====
+app.post('/download-youtube', async (req, res) => {
+  const { youtubeUrl, username, timestamp } = req.body;
+
+  if (!youtubeUrl) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'YouTube URL is required' 
+    });
+  }
+
+  try {
+    console.log(`🎥 Downloading YouTube video: ${youtubeUrl}`);
+
+    // Validate it's a valid YouTube URL
+    if (!ytdl.validateURL(youtubeUrl)) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Invalid YouTube URL' 
+      });
+    }
+
+    // Get video info
+    const info = await ytdl.getInfo(youtubeUrl);
+    const videoTitle = info.videoDetails.title;
+    console.log(`📝 Video title: ${videoTitle}`);
+
+    // Get video formats (choose best quality mp4)
+    const formats = ytdl.filterFormats(info.formats, 'audioandvideo');
+    const format = formats.find(f => f.mimeType && f.mimeType.includes('video/mp4')) || formats[0];
+
+    if (!format) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No suitable video format found' 
+      });
+    }
+
+    // Create download stream
+    const stream = ytdl(youtubeUrl, { format });
+
+    // Upload to Cloudinary (same as your video upload)
+    const cloudinary = require('cloudinary').v2;
+    // Make sure CLOUDINARY_URL is set in your .env
+
+    const uploadStream = cloudinary.uploader.upload_stream(
+      {
+        resource_type: 'video',
+        public_id: `youtube-${Date.now()}`,
+        folder: 'youtube-downloads'
+      },
+      async (error, result) => {
+        if (error) {
+          console.error('❌ Cloudinary upload error:', error);
+          return res.status(500).json({ 
+            success: false, 
+            error: 'Failed to upload to Cloudinary' 
+          });
+        }
+
+        console.log(`✅ Video uploaded to Cloudinary: ${result.secure_url}`);
+
+        // Save to database
+        try {
+          const message = {
+            id: Date.now().toString(),
+            username,
+            videoUrl: result.secure_url + '?quality=auto:good&fetch_format=mp4',
+            timestamp,
+            youtubeTitle: videoTitle
+          };
+
+          // Save to your database (using your existing method)
+          // For example, if using MongoDB:
+          // await Message.create(message);
+
+          // Or if using your current system:
+          messages.push(message);
+
+          return res.json({ 
+            success: true,
+            message: `✅ YouTube video processed: ${videoTitle}`
+          });
+        } catch (dbError) {
+          console.error('❌ Database error:', dbError);
+          return res.status(500).json({ 
+            success: false, 
+            error: 'Failed to save video' 
+          });
+        }
+      }
+    );
+
+    // Pipe the stream
+    stream.pipe(uploadStream);
+
+    // Error handling for download stream
+    stream.on('error', (error) => {
+      console.error('❌ Download error:', error.message);
+      return res.status(500).json({ 
+        success: false, 
+        error: `Download failed: ${error.message}` 
+      });
+    });
+
+  } catch (error) {
+    console.error('❌ YouTube download error:', error.message);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
+    });
+  }
+});
+
+
 
 // ===== START SERVER =====
 const PORT = process.env.PORT || 3000;
@@ -327,3 +443,4 @@ process.on('SIGINT', async () => {
   await pool.end();
   process.exit(0);
 });
+
