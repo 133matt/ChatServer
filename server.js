@@ -10,7 +10,6 @@ const fs = require('fs');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
-const express = require('express');
 const ytdl = require('ytdl-core');
 const app = express();
 
@@ -443,4 +442,5 @@ process.on('SIGINT', async () => {
   await pool.end();
   process.exit(0);
 });
+
 
