@@ -1,201 +1,329 @@
-// ===== server.js - COMPLETE WITH YTDL-CORE SUPPORT =====
+// ===== server.js - STABLE VERSION =====
+// CockroachDB for messages + Cloudinary for videos (100MB)
 
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
+const { Pool } = require('pg');
+const cloudinary = require('cloudinary').v2;
+const fs = require('fs');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const ytdl = require('ytdl-core');
+require('dotenv').config();
+
 const app = express();
+
+// ===== COCKROACHDB SETUP =====
+const pool = new Pool({
+  connectionString: process.env.COCKROACHDB_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// Test connection
+pool.query('SELECT NOW()', (err, res) => {
+  if (err) {
+    console.error('❌ CockroachDB connection error:', err.message);
+  } else {
+    console.log('✅ CockroachDB connected:', res.rows[0]);
+  }
+});
+
+// ===== CLOUDINARY SETUP =====
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
+
+// Test Cloudinary connection
+try {
+  console.log('✅ Cloudinary configured:', process.env.CLOUDINARY_CLOUD_NAME);
+} catch (error) {
+  console.error('❌ Cloudinary config error:', error.message);
+}
 
 // ===== MIDDLEWARE =====
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
-// ===== IN-MEMORY STORAGE =====
-let messages = [];
-const users = new Map();
+// Multer for video files (temporary storage before upload to Cloudinary)
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = 'uploads/';
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir);
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}-${file.originalname}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    const supportedTypes = ['video/mp4', 'video/webm', 'video/quicktime', 'video/mpeg'];
+    if (supportedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Unsupported file type'));
+    }
+  },
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+});
 
-// ===== HEARTBEAT / ONLINE USERS =====
-app.post('/heartbeat', (req, res) => {
-  const { username, timestamp } = req.body;
-  if (username) {
-    users.set(username, { timestamp, username });
+// ===== INITIALIZE DATABASE TABLE =====
+async function initializeDatabase() {
+  try {
+    const createTableQuery = `
+      CREATE TABLE IF NOT EXISTS messages (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        username VARCHAR(255) NOT NULL,
+        text TEXT,
+        image TEXT,
+        video_url TEXT,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+    await pool.query(createTableQuery);
+    console.log('✅ Database table initialized');
+  } catch (error) {
+    console.error('❌ Database initialization error:', error.message);
   }
-  res.json({ success: true });
+}
+
+initializeDatabase();
+
+// ===== PING =====
+app.get('/ping', (req, res) => {
+  console.log('🔔 Ping received');
+  res.json({
+    status: 'online',
+    timestamp: Date.now(),
+    database: 'CockroachDB',
+    storage: 'Cloudinary'
+  });
 });
 
-app.get('/users/online', (req, res) => {
-  const now = Date.now();
-  const onlineUsers = Array.from(users.values()).filter(
-    user => (now - user.timestamp) < 60000 // 60 seconds
-  );
-  res.json(onlineUsers.map(u => u.username));
+// ===== HEALTH CHECK =====
+app.get('/health', async (req, res) => {
+  try {
+    const dbCheck = await pool.query('SELECT NOW()');
+    const cloudinaryCheck = process.env.CLOUDINARY_CLOUD_NAME ? 'configured' : 'missing';
+    const { rows: countRows } = await pool.query('SELECT COUNT(*) as count FROM messages');
+    const messageCount = parseInt(countRows[0].count, 10);
+
+    res.json({
+      status: 'healthy',
+      database: 'CockroachDB connected',
+      cloudinary: cloudinaryCheck,
+      messageCount: messageCount,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'unhealthy',
+      error: error.message
+    });
+  }
 });
 
-// ===== GET ALL MESSAGES =====
-app.get('/messages', (req, res) => {
-  res.json(messages);
+// ===== GET MESSAGES (from CockroachDB) =====
+app.get('/messages', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit, 10) || 50;
+
+    const { rows } = await pool.query(
+      `SELECT id, username, text, image, video_url AS "videoUrl", timestamp
+       FROM messages
+       ORDER BY timestamp ASC
+       LIMIT $1`,
+      [limit]
+    );
+
+    if (!Array.isArray(rows)) {
+      console.warn('⚠️ Messages data is not an array');
+      return res.json([]);
+    }
+
+    console.log(`✅ Fetched ${rows.length} messages from CockroachDB`);
+    res.json(rows);
+  } catch (error) {
+    console.error('❌ GET /messages error:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch messages',
+      message: error.message
+    });
+  }
 });
 
-// ===== POST MESSAGE =====
-app.post('/messages', (req, res) => {
+// ===== POST MESSAGE (insert into CockroachDB) =====
+app.post('/messages', async (req, res) => {
   try {
     const { username, text, image, videoUrl, timestamp } = req.body;
 
-    if (!username) {
-      return res.status(400).json({ success: false, error: 'Username required' });
+    // Validate input
+    if (!username || !username.trim()) {
+      return res.status(400).json({
+        error: 'Invalid: username is required'
+      });
     }
 
     if (!text && !image && !videoUrl) {
-      return res.status(400).json({ success: false, error: 'Message content required' });
+      return res.status(400).json({
+        error: 'Invalid: at least text, image, or video is required'
+      });
     }
 
-    const message = {
-      id: uuidv4(),
-      username,
-      text: text || null,
-      image: image || null,
-      videoUrl: videoUrl || null,
-      timestamp: timestamp || Date.now()
-    };
+    const id = uuidv4();
+    const ts = timestamp ? new Date(timestamp).toISOString() : new Date().toISOString();
+    const cleanUsername = (username || 'Anonymous').trim().slice(0, 255);
 
-    messages.push(message);
+    const insertQuery = `
+      INSERT INTO messages (id, username, text, image, video_url, timestamp)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      RETURNING id, username, text, image, video_url AS "videoUrl", timestamp;
+    `;
 
-    // Keep only last 500 messages
-    if (messages.length > 500) {
-      messages = messages.slice(-500);
-    }
+    const values = [
+      id,
+      cleanUsername,
+      text || null,
+      image || null,
+      videoUrl || null,
+      ts
+    ];
 
-    res.json({ success: true, message });
+    const { rows } = await pool.query(insertQuery, values);
+    const saved = rows[0];
+
+    console.log('✅ Message saved to CockroachDB:', {
+      id: saved.id,
+      username: saved.username,
+      hasText: !!saved.text,
+      hasImage: !!saved.image,
+      hasVideo: !!saved.videoUrl,
+      timestamp: saved.timestamp
+    });
+
+    res.json({
+      success: true,
+      messageId: saved.id,
+      message: saved
+    });
   } catch (error) {
-    console.error('Post error:', error.message);
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ POST /messages error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to save message',
+      message: error.message
+    });
   }
 });
 
 // ===== DELETE ALL MESSAGES =====
-app.delete('/messages/clear', (req, res) => {
-  messages = [];
-  res.json({ success: true });
-});
-
-// ===== UPLOAD IMAGE =====
-app.post('/upload', (req, res) => {
+app.delete('/messages/clear', async (req, res) => {
   try {
-    // Image is already base64 in the message body
-    res.json({ success: true });
+    const result = await pool.query('DELETE FROM messages');
+    const deletedCount = result.rowCount || 0;
+
+    console.log(`✅ Deleted ${deletedCount} messages from CockroachDB`);
+
+    res.json({
+      success: true,
+      message: `Deleted ${deletedCount} messages`,
+      deletedCount: deletedCount
+    });
   } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
+    console.error('❌ DELETE /messages/clear error:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete messages',
+      message: error.message
+    });
   }
 });
 
-// ===== VIDEO DOWNLOAD ENDPOINT (YTDL-CORE) =====
-app.get('/api/download-video', async (req, res) => {
+// ===== UPLOAD VIDEO TO CLOUDINARY =====
+app.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    const url = req.query.url;
-    
-    if (!url) {
-      return res.status(400).json({ success: false, error: 'URL is required' });
+    if (!req.file) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'No file provided' 
+      });
     }
 
-    console.log(`📥 Processing video: ${url}`);
+    const fileSize = req.file.size;
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(2);
 
-    // Validate YouTube URL
-    if (!ytdl.validateURL(url)) {
-      return res.status(400).json({ success: false, error: 'Invalid YouTube URL' });
-    }
+    console.log(`📹 Uploading to Cloudinary: ${req.file.originalname} (${fileSizeMB}MB)`);
 
-    // Get video info
-    const info = await ytdl.getInfo(url);
-    console.log(`✅ Video found: ${info.videoDetails.title}`);
-
-    // Choose best video format
-    // Try quality 18 (360p MP4) first
-    let format = ytdl.chooseFormat(info.formats, { quality: '18' });
-    
-    if (!format || !format.url) {
-      console.warn('⚠️ Quality 18 not available, trying 22...');
-      // Try quality 22 (480p MP4)
-      format = ytdl.chooseFormat(info.formats, { quality: '22' });
-    }
-    
-    if (!format || !format.url) {
-      console.warn('⚠️ Still no format, trying any...');
-      // Try any format
-      format = ytdl.chooseFormat(info.formats, { quality: 'highest' });
-    }
-    
-    if (!format || !format.url) {
-      return res.status(500).json({ success: false, error: 'No suitable video format found' });
-    }
-
-    console.log(`✅ Selected format: ${format.qualityLabel || 'unknown quality'}`);
-    
-    res.json({ 
-      success: true, 
-      url: format.url,
-      title: info.videoDetails.title,
-      quality: format.qualityLabel
+    // Upload to Cloudinary (streaming file)
+    const uploadResult = await cloudinary.uploader.upload(req.file.path, {
+      resource_type: 'video',
+      public_id: `chatroom/videos/${Date.now()}`,
+      chunk_size: 6000000, // 6MB chunks for large files
+      overwrite: true
     });
 
+    // Delete local temp file
+    fs.unlink(req.file.path, (err) => {
+      if (err) console.warn('⚠️ Could not delete temp file:', err.message);
+    });
+
+    const videoUrl = uploadResult.secure_url;
+
+    console.log('✅ Video uploaded to Cloudinary:', {
+      size: `${fileSizeMB}MB`,
+      publicId: uploadResult.public_id,
+      url: videoUrl,
+      duration: uploadResult.duration ? `${uploadResult.duration}s` : 'unknown'
+    });
+
+    res.json({
+      success: true,
+      videoUrl: videoUrl,
+      fileName: req.file.originalname,
+      size: fileSize
+    });
   } catch (error) {
-    console.error('❌ Download error:', error.message);
-    
-    if (error.message.includes('Video unavailable')) {
-      res.status(400).json({ success: false, error: 'Video unavailable' });
-    } else if (error.message.includes('not available')) {
-      res.status(400).json({ success: false, error: 'Video not available in your region' });
-    } else if (error.message.includes('age-restricted')) {
-      res.status(400).json({ success: false, error: 'Video is age-restricted' });
-    } else if (error.message.includes('403')) {
-      res.status(403).json({ success: false, error: 'Access denied - video is private or deleted' });
-    } else {
-      res.status(500).json({ success: false, error: error.message });
+    console.error('❌ Upload error:', error.message);
+
+    // Cleanup on error
+    if (req.file && req.file.path) {
+      fs.unlink(req.file.path, () => {});
     }
+
+    res.status(500).json({
+      success: false,
+      error: 'Upload failed',
+      message: error.message
+    });
   }
-});
-
-// ===== HEALTH CHECK =====
-app.get('/health', (req, res) => {
-  res.json({ status: 'online', messages: messages.length, users: users.size });
-});
-
-// ===== ROOT ROUTE =====
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'Server running',
-    messages: messages.length,
-    onlineUsers: users.size,
-    endpoints: [
-      'GET /messages',
-      'POST /messages',
-      'DELETE /messages/clear',
-      'GET /users/online',
-      'POST /heartbeat',
-      'GET /api/download-video?url=<youtube_url>',
-      'GET /health'
-    ]
-  });
-});
-
-// ===== 404 HANDLER =====
-app.use((req, res) => {
-  res.status(404).json({ success: false, error: 'Endpoint not found' });
-});
-
-// ===== ERROR HANDLER =====
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ success: false, error: 'Server error' });
 });
 
 // ===== START SERVER =====
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ ytdl-core integrated`);
-  console.log(`📥 Video download endpoint: /api/download-video?url=<url>`);
+  console.log(`\n🚀 ChatServer running on port ${PORT}`);
+  console.log(`📊 Database: CockroachDB`);
+  console.log(`☁️  Storage: Cloudinary`);
+  console.log(`🎥 Max video: 100MB`);
+  console.log(`💾 Messaging: CockroachDB messages table\n`);
+  console.log('Endpoints:');
+  console.log('  GET  /ping - Check if online');
+  console.log('  GET  /health - Full health check');
+  console.log('  GET  /messages - Fetch messages from CockroachDB');
+  console.log('  POST /messages - Save message to CockroachDB');
+  console.log('  DELETE /messages/clear - Clear all messages');
+  console.log('  POST /upload - Upload video to Cloudinary\n');
 });
 
-// Export for testing
-module.exports = app;
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  await pool.end();
+  process.exit(0);
+});
