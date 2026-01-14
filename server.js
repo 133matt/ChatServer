@@ -1,8 +1,9 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE SUPPORT (CLOUDINARY FIXED) =====
+// ===== server.js - CHATSERVER WITH YOUTUBE & FILE UPLOAD FIX =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
 const ytdl = require('ytdl-core');
+const fileUpload = require('express-fileupload'); // ADD THIS
 require('dotenv').config();
 
 // ===== CONFIGURE CLOUDINARY WITH INDIVIDUAL ENV VARIABLES =====
@@ -19,6 +20,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(fileUpload()); // ADD THIS LINE
 
 // Store messages in memory (replace with database for production)
 let messages = [];
@@ -55,25 +57,30 @@ app.delete('/messages/clear', (req, res) => {
   res.json({ success: true, message: 'All messages deleted' });
 });
 
-// ===== IMAGE/VIDEO UPLOAD TO CLOUDINARY =====
+// ===== IMAGE/VIDEO UPLOAD TO CLOUDINARY (FIXED) =====
 app.post('/upload', (req, res) => {
-  const { file } = req.files || {};
-
-  if (!file) {
+  // Get file from express-fileupload
+  if (!req.files || !req.files.file) {
+    console.error('❌ No file provided in upload request');
     return res.status(400).json({ success: false, error: 'No file provided' });
   }
+
+  const file = req.files.file;
+  console.log(`📁 Uploading file: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`);
 
   const uploadStream = cloudinary.uploader.upload_stream(
     {
       resource_type: 'auto',
-      folder: 'chatroom-uploads'
+      folder: 'chatroom-uploads',
+      timeout: 60000
     },
     (error, result) => {
       if (error) {
-        console.error('Upload error:', error);
+        console.error('❌ Cloudinary upload error:', error);
         return res.status(500).json({ success: false, error: error.message });
       }
 
+      console.log(`✅ File uploaded to Cloudinary: ${result.secure_url}`);
       res.json({ 
         success: true, 
         videoUrl: result.secure_url 
@@ -81,6 +88,12 @@ app.post('/upload', (req, res) => {
     }
   );
 
+  uploadStream.on('error', (error) => {
+    console.error('❌ Upload stream error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  });
+
+  // Pipe file data to Cloudinary
   uploadStream.end(file.data);
 });
 
@@ -277,6 +290,7 @@ app.get('/health-check', (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`✅ YouTube download support enabled`);
+  console.log(`✅ File upload support enabled`);
   
   const cloudinaryConfig = cloudinary.config();
   console.log(`📊 Cloudinary configured: ${cloudinaryConfig.cloud_name ? '✅ (' + cloudinaryConfig.cloud_name + ')' : '❌'}`);
