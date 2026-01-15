@@ -1,4 +1,4 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE.JS SUPPORT =====
+// ===== server.js - CHATSERVER WITH YOUTUBE.JS SUPPORT (FIXED) =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
@@ -95,7 +95,24 @@ app.post('/upload', (req, res) => {
   uploadStream.end(file.data);
 });
 
-// ===== YOUTUBE DOWNLOAD ENDPOINT (YOUTUBE.JS) =====
+// ===== HELPER: Extract Video ID from YouTube URL =====
+function extractVideoId(youtubeUrl) {
+  const patterns = [
+    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/watch\?.*v=([a-zA-Z0-9_-]{11})/,
+    /youtu\.be\/([a-zA-Z0-9_-]{11})/
+  ];
+  
+  for (const pattern of patterns) {
+    const match = youtubeUrl.match(pattern);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+// ===== YOUTUBE DOWNLOAD ENDPOINT (YOUTUBE.JS - FIXED) =====
 app.post('/download-youtube', async (req, res) => {
   const { youtubeUrl, username, timestamp } = req.body;
 
@@ -131,15 +148,10 @@ app.post('/download-youtube', async (req, res) => {
     }
     console.log('✅ URL validation passed');
 
-    // Step 2: Create Innertube instance
-    console.log('🔌 Creating YouTube.js Innertube instance...');
-    const yt = await Innertube.create({ gl: 'US', hl: 'en' });
-    console.log('✅ Innertube instance created');
-
-    // Step 3: Extract video ID
-    const videoId = yt.extractVideoId(youtubeUrl);
+    // Step 2: Extract video ID from URL
+    const videoId = extractVideoId(youtubeUrl);
     if (!videoId) {
-      console.error('❌ Could not extract video ID');
+      console.error('❌ Could not extract video ID from URL');
       return res.status(400).json({ 
         success: false, 
         error: 'Could not extract video ID from URL' 
@@ -147,11 +159,16 @@ app.post('/download-youtube', async (req, res) => {
     }
     console.log(`✅ Video ID: ${videoId}`);
 
+    // Step 3: Create Innertube instance
+    console.log('🔌 Creating YouTube.js Innertube instance...');
+    const yt = await Innertube.create({ gl: 'US', hl: 'en' });
+    console.log('✅ Innertube instance created');
+
     // Step 4: Get video info
     console.log('📥 Fetching video information...');
     let info;
     try {
-      info = await yt.getInfo(videoId);
+      info = await yt.getBasicInfo(videoId);
     } catch (infoError) {
       console.error('❌ Failed to get video info:', infoError.message);
       return res.status(400).json({ 
@@ -160,8 +177,8 @@ app.post('/download-youtube', async (req, res) => {
       });
     }
 
-    const videoTitle = info.basic_info?.title || 'YouTube Video';
-    const videoDuration = info.basic_info?.duration || 'unknown';
+    const videoTitle = info.basic_info?.title || info.info?.title || 'YouTube Video';
+    const videoDuration = info.basic_info?.duration || info.info?.duration || 'unknown';
     console.log(`📝 Video title: ${videoTitle}`);
     console.log(`⏱️  Duration: ${videoDuration}s`);
 
@@ -170,7 +187,7 @@ app.post('/download-youtube', async (req, res) => {
     let stream;
     try {
       stream = await yt.download(videoId, {
-        quality: '360p', // Adjust quality as needed: '360p', '480p', '720p', '1080p'
+        quality: '360p',
         type: 'video+audio'
       });
     } catch (downloadError) {
@@ -193,7 +210,7 @@ app.post('/download-youtube', async (req, res) => {
           { width: 300, height: 300, crop: 'fill', format: 'jpg' }
         ],
         eager_async: true,
-        timeout: 120000 // 2 minute timeout for large videos
+        timeout: 120000
       },
       async (error, result) => {
         if (error) {
