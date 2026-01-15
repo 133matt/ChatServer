@@ -1,13 +1,12 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE & FILE UPLOAD (YT-DLP FIX) =====
+// ===== server.js - CHATSERVER WITH YOUTUBE.JS SUPPORT =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
-const { execFile } = require('child_process');
-const path = require('path');
 const fileUpload = require('express-fileupload');
+const { Innertube } = require('youtubei.js');
 require('dotenv').config();
 
-// ===== CONFIGURE CLOUDINARY WITH INDIVIDUAL ENV VARIABLES =====
+// ===== CONFIGURE CLOUDINARY =====
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dfkedoqtu',
   api_key: process.env.CLOUDINARY_API_KEY || '974623582669831',
@@ -96,7 +95,7 @@ app.post('/upload', (req, res) => {
   uploadStream.end(file.data);
 });
 
-// ===== YOUTUBE DOWNLOAD ENDPOINT (YT-DLP) =====
+// ===== YOUTUBE DOWNLOAD ENDPOINT (YOUTUBE.JS) =====
 app.post('/download-youtube', async (req, res) => {
   const { youtubeUrl, username, timestamp } = req.body;
 
@@ -121,7 +120,7 @@ app.post('/download-youtube', async (req, res) => {
     console.log(`🎥 [YouTube] Received request for: ${youtubeUrl}`);
     console.log(`👤 Username: ${username}`);
 
-    // Step 1: Validate YouTube URL
+    // Step 1: Validate YouTube URL format
     const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//;
     if (!youtubeRegex.test(youtubeUrl)) {
       console.error('❌ Invalid YouTube URL format');
@@ -132,32 +131,58 @@ app.post('/download-youtube', async (req, res) => {
     }
     console.log('✅ URL validation passed');
 
-    // Step 2: Download using yt-dlp command line
-    console.log('📥 Starting yt-dlp download...');
-    
-    const downloadPromise = new Promise((resolve, reject) => {
-      // Run yt-dlp to get video info and best format
-      execFile('yt-dlp', [
-        youtubeUrl,
-        '-f', 'best[ext=mp4]/best',
-        '-o', '-', // output to stdout
-      ], {
-        maxBuffer: 100 * 1024 * 1024, // 100MB buffer
-        timeout: 120000 // 2 minute timeout
-      }, (error, stdout, stderr) => {
-        if (error) {
-          console.error('❌ yt-dlp error:', stderr || error.message);
-          reject(new Error(stderr || error.message));
-        } else {
-          resolve(stdout);
-        }
+    // Step 2: Create Innertube instance
+    console.log('🔌 Creating YouTube.js Innertube instance...');
+    const yt = await Innertube.create({ gl: 'US', hl: 'en' });
+    console.log('✅ Innertube instance created');
+
+    // Step 3: Extract video ID
+    const videoId = yt.extractVideoId(youtubeUrl);
+    if (!videoId) {
+      console.error('❌ Could not extract video ID');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Could not extract video ID from URL' 
       });
-    });
+    }
+    console.log(`✅ Video ID: ${videoId}`);
 
-    const videoStream = await downloadPromise;
-    console.log(`✅ Video downloaded: ${(videoStream.length / 1024 / 1024).toFixed(2)}MB`);
+    // Step 4: Get video info
+    console.log('📥 Fetching video information...');
+    let info;
+    try {
+      info = await yt.getInfo(videoId);
+    } catch (infoError) {
+      console.error('❌ Failed to get video info:', infoError.message);
+      return res.status(400).json({ 
+        success: false, 
+        error: `Cannot download video: ${infoError.message}. Video may be private, age-restricted, or unavailable.` 
+      });
+    }
 
-    // Step 3: Upload to Cloudinary
+    const videoTitle = info.basic_info?.title || 'YouTube Video';
+    const videoDuration = info.basic_info?.duration || 'unknown';
+    console.log(`📝 Video title: ${videoTitle}`);
+    console.log(`⏱️  Duration: ${videoDuration}s`);
+
+    // Step 5: Download video stream
+    console.log('📥 Starting YouTube video download...');
+    let stream;
+    try {
+      stream = await yt.download(videoId, {
+        quality: '360p', // Adjust quality as needed: '360p', '480p', '720p', '1080p'
+        type: 'video+audio'
+      });
+    } catch (downloadError) {
+      console.error('❌ Failed to download video:', downloadError.message);
+      return res.status(400).json({ 
+        success: false, 
+        error: `Download failed: ${downloadError.message}` 
+      });
+    }
+    console.log('✅ Download stream created');
+
+    // Step 6: Upload to Cloudinary
     console.log('☁️  Starting Cloudinary upload...');
     const uploadStream = cloudinary.uploader.upload_stream(
       {
@@ -168,7 +193,7 @@ app.post('/download-youtube', async (req, res) => {
           { width: 300, height: 300, crop: 'fill', format: 'jpg' }
         ],
         eager_async: true,
-        timeout: 60000
+        timeout: 120000 // 2 minute timeout for large videos
       },
       async (error, result) => {
         if (error) {
@@ -181,13 +206,14 @@ app.post('/download-youtube', async (req, res) => {
 
         console.log(`✅ Video uploaded to Cloudinary: ${result.secure_url}`);
 
-        // Step 4: Save to database
+        // Step 7: Save to database
         try {
           const message = {
             id: Date.now().toString(),
             username,
             videoUrl: result.secure_url + '?quality=auto:good&fetch_format=mp4',
             timestamp,
+            youtubeTitle: videoTitle,
             youtubeUrl: youtubeUrl
           };
 
@@ -196,9 +222,9 @@ app.post('/download-youtube', async (req, res) => {
 
           return res.json({ 
             success: true,
-            message: `✅ YouTube video processed`,
+            message: `✅ YouTube video processed: ${videoTitle}`,
             videoUrl: message.videoUrl,
-            title: 'YouTube Video'
+            title: videoTitle
           });
         } catch (dbError) {
           console.error('❌ Database error:', dbError);
@@ -210,14 +236,15 @@ app.post('/download-youtube', async (req, res) => {
       }
     );
 
+    // Handle upload stream errors
     uploadStream.on('error', (error) => {
       console.error('❌ Upload stream error:', error);
       res.status(500).json({ success: false, error: error.message });
     });
 
-    // Write video stream to upload
-    uploadStream.end(videoStream);
-    console.log('📊 Uploading video to Cloudinary...');
+    // Pipe download stream to Cloudinary
+    stream.pipe(uploadStream);
+    console.log('📊 Piping video to Cloudinary...');
 
   } catch (error) {
     console.error('❌ Unexpected error:', error.message);
@@ -229,29 +256,12 @@ app.post('/download-youtube', async (req, res) => {
 });
 
 // ===== HEALTH CHECK ENDPOINT =====
-app.get('/health-check', async (req, res) => {
+app.get('/health-check', (req, res) => {
   const cloudinaryConfig = cloudinary.config();
-  
-  // Check if yt-dlp is available
-  let ytdlpAvailable = false;
-  try {
-    await new Promise((resolve, reject) => {
-      execFile('yt-dlp', ['--version'], { timeout: 5000 }, (error, stdout) => {
-        if (!error) {
-          console.log(`✅ yt-dlp version: ${stdout.trim()}`);
-          ytdlpAvailable = true;
-        }
-        resolve();
-      });
-    });
-  } catch (e) {
-    console.log('⚠️ yt-dlp not available');
-  }
-
   res.json({ 
     status: 'ok',
     message: 'Server is running',
-    ytdlp: ytdlpAvailable ? 'installed ✅' : 'checking...',
+    youtubejs: typeof Innertube !== 'undefined' ? 'loaded ✅' : 'missing ❌',
     cloudinary: cloudinaryConfig.cloud_name ? 'configured ✅' : 'not configured ❌',
     cloudinaryCloudName: cloudinaryConfig.cloud_name || 'not set',
     messagesCount: messages.length
@@ -261,11 +271,12 @@ app.get('/health-check', async (req, res) => {
 // ===== START SERVER =====
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ YouTube download support enabled (yt-dlp)`);
+  console.log(`✅ YouTube download support enabled (YouTube.js)`);
   console.log(`✅ File upload support enabled`);
   
   const cloudinaryConfig = cloudinary.config();
   console.log(`📊 Cloudinary configured: ${cloudinaryConfig.cloud_name ? '✅ (' + cloudinaryConfig.cloud_name + ')' : '❌'}`);
+  console.log(`📦 YouTube.js (youtubei.js) available: ${typeof Innertube !== 'undefined' ? '✅' : '❌'}`);
 });
 
 module.exports = app;
