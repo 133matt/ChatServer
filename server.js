@@ -1,9 +1,9 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE & FILE UPLOAD FIX =====
+// ===== server.js - CHATSERVER WITH YOUTUBE & FILE UPLOAD (YTDL UPDATED) =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
-const ytdl = require('ytdl-core');
-const fileUpload = require('express-fileupload'); // ADD THIS
+const ytdl = require('@distube/ytdl');
+const fileUpload = require('express-fileupload');
 require('dotenv').config();
 
 // ===== CONFIGURE CLOUDINARY WITH INDIVIDUAL ENV VARIABLES =====
@@ -20,7 +20,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(fileUpload()); // ADD THIS LINE
+app.use(fileUpload());
 
 // Store messages in memory (replace with database for production)
 let messages = [];
@@ -57,9 +57,8 @@ app.delete('/messages/clear', (req, res) => {
   res.json({ success: true, message: 'All messages deleted' });
 });
 
-// ===== IMAGE/VIDEO UPLOAD TO CLOUDINARY (FIXED) =====
+// ===== IMAGE/VIDEO UPLOAD TO CLOUDINARY =====
 app.post('/upload', (req, res) => {
-  // Get file from express-fileupload
   if (!req.files || !req.files.file) {
     console.error('❌ No file provided in upload request');
     return res.status(400).json({ success: false, error: 'No file provided' });
@@ -93,11 +92,10 @@ app.post('/upload', (req, res) => {
     res.status(500).json({ success: false, error: error.message });
   });
 
-  // Pipe file data to Cloudinary
   uploadStream.end(file.data);
 });
 
-// ===== YOUTUBE DOWNLOAD ENDPOINT (FIXED) =====
+// ===== YOUTUBE DOWNLOAD ENDPOINT (WITH @distube/ytdl) =====
 app.post('/download-youtube', async (req, res) => {
   const { youtubeUrl, username, timestamp } = req.body;
 
@@ -203,10 +201,10 @@ app.post('/download-youtube', async (req, res) => {
         public_id: `youtube-${Date.now()}`,
         folder: 'youtube-downloads',
         eager: [
-          { width: 300, height: 300, crop: 'fill', format: 'jpg' } // Thumbnail
+          { width: 300, height: 300, crop: 'fill', format: 'jpg' }
         ],
         eager_async: true,
-        timeout: 60000 // 60 second timeout
+        timeout: 60000
       },
       async (error, result) => {
         if (error) {
@@ -230,7 +228,6 @@ app.post('/download-youtube', async (req, res) => {
             youtubeUrl: youtubeUrl
           };
 
-          // Save to messages array
           messages.push(message);
           console.log('✅ Message saved to database');
 
@@ -289,12 +286,12 @@ app.get('/health-check', (req, res) => {
 // ===== START SERVER =====
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ YouTube download support enabled`);
+  console.log(`✅ YouTube download support enabled (@distube/ytdl)`);
   console.log(`✅ File upload support enabled`);
   
   const cloudinaryConfig = cloudinary.config();
   console.log(`📊 Cloudinary configured: ${cloudinaryConfig.cloud_name ? '✅ (' + cloudinaryConfig.cloud_name + ')' : '❌'}`);
-  console.log(`📦 ytdl-core available: ${typeof ytdl !== 'undefined' ? '✅' : '❌'}`);
+  console.log(`📦 @distube/ytdl available: ${typeof ytdl !== 'undefined' ? '✅' : '❌'}`);
 });
 
 module.exports = app;
