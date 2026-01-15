@@ -17,7 +17,6 @@
     "pg": "^8.9.0",
     "cloudinary": "^1.32.0",
     "dotenv": "^16.0.3",
-   "@distube/ytdl": "^4.16.12",
     "express-fileupload": "^1.4.0"
   },
   "devDependencies": {
@@ -28,6 +27,7 @@
     "npm": ">=8.0.0"
   }
 }
+
 
 
 
