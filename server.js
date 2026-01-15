@@ -1,9 +1,9 @@
-// ===== server.js - CHATSERVER WITH YOUTUBE.JS SUPPORT (FIXED) =====
+// ===== server.js - CHATSERVER WITH @DISTUBE/YTDL-CORE (AGE-RESTRICTED SUPPORT) =====
 const express = require('express');
 const cors = require('cors');
 const cloudinary = require('cloudinary').v2;
 const fileUpload = require('express-fileupload');
-const { Innertube } = require('youtubei.js');
+const ytdl = require('@distube/ytdl-core');
 require('dotenv').config();
 
 // ===== CONFIGURE CLOUDINARY =====
@@ -95,24 +95,7 @@ app.post('/upload', (req, res) => {
   uploadStream.end(file.data);
 });
 
-// ===== HELPER: Extract Video ID from YouTube URL =====
-function extractVideoId(youtubeUrl) {
-  const patterns = [
-    /(?:youtube\.com\/watch\?v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/,
-    /youtube\.com\/watch\?.*v=([a-zA-Z0-9_-]{11})/,
-    /youtu\.be\/([a-zA-Z0-9_-]{11})/
-  ];
-  
-  for (const pattern of patterns) {
-    const match = youtubeUrl.match(pattern);
-    if (match && match[1]) {
-      return match[1];
-    }
-  }
-  return null;
-}
-
-// ===== YOUTUBE DOWNLOAD ENDPOINT (YOUTUBE.JS - FIXED) =====
+// ===== YOUTUBE DOWNLOAD ENDPOINT (@DISTUBE/YTDL-CORE) =====
 app.post('/download-youtube', async (req, res) => {
   const { youtubeUrl, username, timestamp } = req.body;
 
@@ -148,47 +131,34 @@ app.post('/download-youtube', async (req, res) => {
     }
     console.log('✅ URL validation passed');
 
-    // Step 2: Extract video ID from URL
-    const videoId = extractVideoId(youtubeUrl);
-    if (!videoId) {
-      console.error('❌ Could not extract video ID from URL');
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Could not extract video ID from URL' 
-      });
-    }
-    console.log(`✅ Video ID: ${videoId}`);
-
-    // Step 3: Create Innertube instance
-    console.log('🔌 Creating YouTube.js Innertube instance...');
-    const yt = await Innertube.create({ gl: 'US', hl: 'en' });
-    console.log('✅ Innertube instance created');
-
-    // Step 4: Get video info
+    // Step 2: Get video info
     console.log('📥 Fetching video information...');
     let info;
     try {
-      info = await yt.getBasicInfo(videoId);
+      info = await ytdl.getInfo(youtubeUrl);
     } catch (infoError) {
       console.error('❌ Failed to get video info:', infoError.message);
       return res.status(400).json({ 
         success: false, 
-        error: `Cannot download video: ${infoError.message}. Video may be private, age-restricted, or unavailable.` 
+        error: `Cannot download video: ${infoError.message}. Video may be unavailable or require login.` 
       });
     }
 
-    const videoTitle = info.basic_info?.title || info.info?.title || 'YouTube Video';
-    const videoDuration = info.basic_info?.duration || info.info?.duration || 'unknown';
+    const videoTitle = info.videoDetails?.title || 'YouTube Video';
+    const videoDuration = info.videoDetails?.lengthSeconds || 'unknown';
+    const videoId = info.videoDetails?.videoId || 'unknown';
+    
     console.log(`📝 Video title: ${videoTitle}`);
     console.log(`⏱️  Duration: ${videoDuration}s`);
+    console.log(`🎬 Video ID: ${videoId}`);
 
-    // Step 5: Download video stream
+    // Step 3: Download video stream
     console.log('📥 Starting YouTube video download...');
     let stream;
     try {
-      stream = await yt.download(videoId, {
-        quality: '360p',
-        type: 'video+audio'
+      stream = ytdl(youtubeUrl, {
+        quality: 'highest',
+        filter: 'audioandvideo'
       });
     } catch (downloadError) {
       console.error('❌ Failed to download video:', downloadError.message);
@@ -199,7 +169,7 @@ app.post('/download-youtube', async (req, res) => {
     }
     console.log('✅ Download stream created');
 
-    // Step 6: Upload to Cloudinary
+    // Step 4: Upload to Cloudinary
     console.log('☁️  Starting Cloudinary upload...');
     const uploadStream = cloudinary.uploader.upload_stream(
       {
@@ -223,7 +193,7 @@ app.post('/download-youtube', async (req, res) => {
 
         console.log(`✅ Video uploaded to Cloudinary: ${result.secure_url}`);
 
-        // Step 7: Save to database
+        // Step 5: Save to database
         try {
           const message = {
             id: Date.now().toString(),
@@ -267,7 +237,7 @@ app.post('/download-youtube', async (req, res) => {
     console.error('❌ Unexpected error:', error.message);
     return res.status(500).json({ 
       success: false, 
-      error: `Cannot download video: ${error.message}. Video may be private, age-restricted, or unavailable.` 
+      error: `Cannot download video: ${error.message}. Video may be unavailable or require login.` 
     });
   }
 });
@@ -278,7 +248,7 @@ app.get('/health-check', (req, res) => {
   res.json({ 
     status: 'ok',
     message: 'Server is running',
-    youtubejs: typeof Innertube !== 'undefined' ? 'loaded ✅' : 'missing ❌',
+    ytdl: typeof ytdl !== 'undefined' ? 'loaded ✅' : 'missing ❌',
     cloudinary: cloudinaryConfig.cloud_name ? 'configured ✅' : 'not configured ❌',
     cloudinaryCloudName: cloudinaryConfig.cloud_name || 'not set',
     messagesCount: messages.length
@@ -288,12 +258,12 @@ app.get('/health-check', (req, res) => {
 // ===== START SERVER =====
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ YouTube download support enabled (YouTube.js)`);
+  console.log(`✅ YouTube download support enabled (@distube/ytdl-core)`);
   console.log(`✅ File upload support enabled`);
   
   const cloudinaryConfig = cloudinary.config();
   console.log(`📊 Cloudinary configured: ${cloudinaryConfig.cloud_name ? '✅ (' + cloudinaryConfig.cloud_name + ')' : '❌'}`);
-  console.log(`📦 YouTube.js (youtubei.js) available: ${typeof Innertube !== 'undefined' ? '✅' : '❌'}`);
+  console.log(`📦 @distube/ytdl-core available: ${typeof ytdl !== 'undefined' ? '✅' : '❌'}`);
 });
 
 module.exports = app;
