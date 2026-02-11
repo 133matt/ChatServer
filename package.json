@@ -19,6 +19,7 @@
     "dotenv": "^16.0.3",
     "@distube/ytdl-core": "latest",
     "express-fileupload": "^1.4.0"
+    "@supabase/supabase-js": "latest"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
@@ -28,6 +29,7 @@
     "npm": ">=8.0.0"
   }
 }
+
 
 
 
